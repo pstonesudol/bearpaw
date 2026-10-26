@@ -29,6 +29,11 @@ rusb = { version = "0.9", features = ["vendored"] }
 thiserror = "2"
 csv = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
+# Audio capture and WAV writing for hit recordings. `cpal` is cross-platform,
+# but the feature is designed and documented for macOS; Linux needs ALSA
+# headers (libasound2-dev) to build.
+cpal = "0.15"
+hound = "3.5"
 
 [dev-dependencies]
 tokio-test = "0.4"
