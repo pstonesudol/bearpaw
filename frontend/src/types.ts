@@ -279,7 +279,8 @@ export interface StateUpdateMessage {
 export interface EventMessage {
   type: 'event';
   timestamp: number;
-  event: 'scan_hit' | 'hold' | 'scan_start' | 'state_stale';
+  event:
+    'scan_hit' | 'hold' | 'scan_start' | 'state_stale' | 'recording_ready' | 'transcript_ready';
   data: Record<string, unknown> & {
     frequency?: number;
     channel?: number;
@@ -287,6 +288,16 @@ export interface EventMessage {
     rssi?: number;
     duration?: number;
     message?: string;
+    /** Durable hit id, allocated at squelch-open. */
+    hit_uid?: string | null;
+    recording_status?: RecordingStatus;
+    recording_duration?: number | null;
+    recording_error?: string | null;
+    link_confidence?: LinkConfidence | null;
+    transcript?: string | null;
+    transcript_status?: TranscriptStatus;
+    transcript_engine?: string | null;
+    transcript_error?: string | null;
   };
 }
 
@@ -303,6 +314,61 @@ export interface ErrorMessage {
   message: string;
 }
 
+/**
+ * `none` — no audio (recording off, or the hit was too short to keep).
+ * `recording` — a segment is still being written.
+ * `ready` — a complete transmission.
+ * `partial` — real audio, but the segment ended without a squelch close
+ *   (device loss, shutdown, frequency change). `link_confidence` says whether
+ *   it is known to belong to this hit.
+ * `too_short`, `failed`, `deleted`, `missing` — nothing is playable.
+ */
+export type RecordingStatus =
+  'none' | 'recording' | 'ready' | 'partial' | 'too_short' | 'failed' | 'deleted' | 'missing';
+
+export type TranscriptStatus = 'none' | 'pending' | 'processing' | 'completed' | 'failed';
+
+/** Whether a recording is known to belong to its hit. */
+export type LinkConfidence = 'exact' | 'uncertain';
+
+/** A hit row as the API returns it. */
+export interface HitDetail {
+  id: string;
+  timestamp: number;
+  frequency: number;
+  channel?: number | null;
+  alpha_tag?: string | null;
+  rssi?: number;
+  duration?: number | null;
+  modulation?: string;
+  mode?: string;
+  bank?: number | null;
+  session_id?: string;
+  ended_at?: number | null;
+  scanner_id?: string | null;
+  hit_uid?: string | null;
+  recording_status?: RecordingStatus;
+  recording_file?: string | null;
+  recording_duration?: number | null;
+  recording_bytes?: number | null;
+  recording_error?: string | null;
+  link_confidence?: LinkConfidence | null;
+  transcript?: string | null;
+  transcript_original?: string | null;
+  transcript_status?: TranscriptStatus;
+  transcript_engine?: string | null;
+  transcript_error?: string | null;
+  transcript_attempts?: number;
+  updated_at?: number | null;
+}
+
+export interface HitPage {
+  hits: HitDetail[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 export interface ActivityLogEntry {
   id: string;
   timestamp: number;
@@ -314,6 +380,60 @@ export interface ActivityLogEntry {
   hasAudio?: boolean;
   duration?: number | null;
   ended_at?: number | null;
+  /** Durable id allocated at squelch-open; absent for entries created before
+   *  the recording feature, which therefore have no detail actions. */
+  hit_uid?: string | null;
+  recording_status?: RecordingStatus;
+  recording_duration?: number | null;
+  link_confidence?: LinkConfidence | null;
+  transcript?: string | null;
+  transcript_status?: TranscriptStatus;
+  transcript_error?: string | null;
+}
+
+export interface AudioDeviceInfo {
+  name: string;
+  is_default: boolean;
+  channels: number;
+  sample_rate: number;
+}
+
+export interface CaptureStatusSnapshot {
+  running: boolean;
+  connected: boolean;
+  device?: string | null;
+  last_error?: string | null;
+  /** Peak level of the last chunk, dBFS. -90 is silence. */
+  level_db: number;
+  dropped_chunks: number;
+}
+
+export interface RecordingStatusSnapshot {
+  enabled: boolean;
+  active_hit: boolean;
+  recordings_dir: string;
+  retention_days: number;
+  capture: CaptureStatusSnapshot;
+}
+
+export interface WhisperModelInfo {
+  name: string;
+  path: string;
+  size_bytes: number;
+}
+
+export interface AudioDevicesResponse {
+  devices: AudioDeviceInfo[];
+  selected?: string | null;
+  status: RecordingStatusSnapshot;
+  models: WhisperModelInfo[];
+  models_dir: string;
+  transcription: {
+    enabled: boolean;
+    language: string;
+    resolved_binary?: string | null;
+    resolved_model?: string | null;
+  };
 }
 
 export interface LockoutsResponse {

@@ -1,14 +1,16 @@
 import { motion } from 'motion/react';
-import { FileText } from 'lucide-react';
-import { useMemo } from 'react';
+import { FileText, History, Mic } from 'lucide-react';
+import { useMemo, useState } from 'react';
 import { BarChart, Bar, LabelList, ResponsiveContainer, XAxis } from 'recharts';
 import { cn } from '../../../lib/utils';
 import { useStore } from '../../../store/useStore';
 import type { ConnectionStatus } from '../../../hooks/useConnectionStatus';
 import type { BusiestChannel, HeatmapStats } from '../../../hooks/useDashboardAnalytics';
 import { useScannerCapabilities } from '../../../hooks/useScannerCapabilities';
-import type { ActivityLogEntry } from '../../../types';
+import type { ActivityLogEntry, RecordingStatus, TranscriptStatus } from '../../../types';
 import { ScannerDisplay, type LockoutKind } from '../ScannerUI';
+import { HitDetailSheet } from './HitDetailSheet';
+import { HitHistorySheet } from './HitHistorySheet';
 import type { ScannerMode } from '../../App';
 
 /** Row order for the heatmap: Monday first, matching `computeLocalHeatmap`. */
@@ -77,6 +79,13 @@ export interface RolledHit {
   strength: number;
   time: number;
   count: number;
+  /** Durable id of the newest hit in the group; null for pre-recording rows. */
+  hitUid: string | null;
+  recordingStatus?: RecordingStatus;
+  transcriptStatus?: TranscriptStatus;
+  transcript?: string | null;
+  /** The newest hit, so opening the row shows the transmission it names. */
+  entry: ActivityLogEntry;
 }
 
 /** Channel number is the grouping identity; frequency is the fallback for
@@ -116,6 +125,11 @@ export function rollUpHits(entries: ActivityLogEntry[]): RolledHit[] {
         strength: strengthSum,
         time: entry.timestamp,
         count: 1,
+        hitUid: entry.hit_uid ?? null,
+        recordingStatus: entry.recording_status,
+        transcriptStatus: entry.transcript_status,
+        transcript: entry.transcript ?? null,
+        entry,
       });
       continue;
     }
@@ -214,6 +228,11 @@ export function ScanView({
     () => rollUpHits(fullActivityLog).slice(0, HIT_SLOT_COUNT),
     [fullActivityLog],
   );
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [selectedHit, setSelectedHit] = useState<{
+    uid: string;
+    entry: ActivityLogEntry | null;
+  } | null>(null);
 
   const isError = connectionStatus === 'disconnected';
   // The last mode survives a disconnect, so `mode === 'SCAN'` alone kept the
@@ -261,7 +280,7 @@ export function ScanView({
         {/* Recent Hits */}
         <div className="flex-1 min-w-0 overflow-hidden flex flex-col gap-[clamp(32px,3cqmin,60px)] self-stretch py-[10px]">
           <div className="flex shrink-0 items-center justify-between border-b border-white/10 pb-[clamp(6px,1.8cqmin,28px)]">
-            <h3 className="font-display font-bold text-[clamp(13px,3.5cqmin,56px)] text-scanner-text-light">
+            <h3 className="shrink-0 whitespace-nowrap font-display font-bold text-[clamp(13px,3.5cqmin,56px)] text-scanner-text-light">
               Recent Hits
             </h3>
             {/* A visible text label, not an icon plus a hover tooltip. The
@@ -270,19 +289,30 @@ export function ScanView({
               scanning the page. `aria-label` stays because it is more specific
               than the visible text and contains it, which is what WCAG 2.5.3
               (Label in Name) requires. */}
-            <button
-              type="button"
-              onClick={onOpenActivityExport}
-              disabled={fullActivityLog.length === 0}
-              className={cn(
-                'inline-flex shrink-0 items-center gap-[clamp(4px,1.2cqmin,16px)] rounded-scanner-xs border border-white/10 bg-white/5 px-[clamp(8px,1.8cqmin,28px)] py-[clamp(4px,1cqmin,16px)] text-[clamp(11px,2.6cqmin,44px)] text-white/80 transition-colors hover:border-white/20 hover:bg-white/10 hover:text-white',
-                fullActivityLog.length === 0 && 'cursor-not-allowed opacity-50',
-              )}
-              aria-label="Export activity log"
-            >
-              <FileText aria-hidden className="size-[clamp(14px,2.2cqmin,36px)]" />
-              Export
-            </button>
+            <div className="flex shrink-0 items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setHistoryOpen(true)}
+                className="inline-flex shrink-0 items-center gap-[clamp(4px,1.2cqmin,16px)] rounded-scanner-xs border border-white/10 bg-white/5 px-[clamp(8px,1.8cqmin,28px)] py-[clamp(4px,1cqmin,16px)] text-[clamp(11px,2.6cqmin,44px)] text-white/80 transition-colors hover:border-white/20 hover:bg-white/10 hover:text-white"
+                aria-label="Search hit history"
+              >
+                <History aria-hidden className="size-[clamp(14px,2.2cqmin,36px)]" />
+                History
+              </button>
+              <button
+                type="button"
+                onClick={onOpenActivityExport}
+                disabled={fullActivityLog.length === 0}
+                className={cn(
+                  'inline-flex shrink-0 items-center gap-[clamp(4px,1.2cqmin,16px)] rounded-scanner-xs border border-white/10 bg-white/5 px-[clamp(8px,1.8cqmin,28px)] py-[clamp(4px,1cqmin,16px)] text-[clamp(11px,2.6cqmin,44px)] text-white/80 transition-colors hover:border-white/20 hover:bg-white/10 hover:text-white',
+                  fullActivityLog.length === 0 && 'cursor-not-allowed opacity-50',
+                )}
+                aria-label="Export activity log"
+              >
+                <FileText aria-hidden className="size-[clamp(14px,2.2cqmin,36px)]" />
+                Export
+              </button>
+            </div>
           </div>
           {recentHits.length === 0 ? (
             <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-2 pr-2 text-white/60 text-[clamp(11px,3cqmin,52px)] italic">
@@ -323,10 +353,19 @@ export function ScanView({
                   return <div key={`empty-${idx}`} className="col-span-4" aria-hidden="true" />;
                 }
                 const countSuffix = hit.count > 1 ? ` (${hit.count})` : '';
+                const recorded =
+                  hit.recordingStatus === 'ready' ||
+                  hit.recordingStatus === 'partial' ||
+                  hit.recordingStatus === 'recording';
                 return (
-                  <div
+                  <button
                     key={hit.id}
-                    className="col-span-4 grid grid-cols-subgrid items-center rounded-[4px] px-[clamp(2px,1cqmin,12px)] hover:bg-white/5"
+                    type="button"
+                    onClick={() => setSelectedHit({ uid: hit.hitUid ?? hit.id, entry: hit.entry })}
+                    className="col-span-4 grid grid-cols-subgrid items-center rounded-[4px] px-[clamp(2px,1cqmin,12px)] text-left hover:bg-white/5 focus-visible:bg-white/10 focus-visible:outline-none"
+                    aria-label={`Open hit at ${hit.frequency} MHz${hit.tag ? `, ${hit.tag}` : ''}${
+                      hit.transcript ? `, transcript: ${hit.transcript}` : ''
+                    }`}
                   >
                     <span className="whitespace-nowrap text-white/60">
                       {getRelativeTime(hit.time)}
@@ -334,11 +373,47 @@ export function ScanView({
                     <span className="whitespace-nowrap text-right font-mono text-brand-light">
                       {hit.frequency}
                     </span>
-                    <span className="whitespace-nowrap text-white/60" title={hit.tag || undefined}>
-                      {showTagColumn ? `${hit.tag || '—'}${countSuffix}` : countSuffix.trimStart()}
+                    <span className="flex min-w-0 flex-col">
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <span className="truncate text-white/60" title={hit.tag || undefined}>
+                          {showTagColumn
+                            ? `${hit.tag || '—'}${countSuffix}`
+                            : countSuffix.trimStart()}
+                        </span>
+                        {recorded && (
+                          <Mic
+                            aria-label="Has a recording"
+                            className="size-[0.6em] shrink-0 text-brand-primary"
+                          />
+                        )}
+                        {hit.transcriptStatus && hit.transcriptStatus !== 'none' && (
+                          <span
+                            className={cn(
+                              'size-[0.35em] shrink-0 rounded-full',
+                              hit.transcriptStatus === 'completed'
+                                ? 'bg-emerald-400'
+                                : hit.transcriptStatus === 'failed'
+                                  ? 'bg-red-400'
+                                  : 'animate-pulse bg-amber-400',
+                            )}
+                            aria-label={
+                              hit.transcriptStatus === 'completed'
+                                ? 'Transcribed'
+                                : hit.transcriptStatus === 'failed'
+                                  ? 'Transcription failed'
+                                  : 'Transcription in progress'
+                            }
+                          />
+                        )}
+                      </span>
+                      {hit.transcript && (
+                        <span className="truncate text-[0.55em] italic leading-tight text-white/35">
+                          {hit.transcript}
+                        </span>
+                      )}
                     </span>
                     <HitSignalBars strength={hit.strength} />
-                  </div>
+                  </button>
                 );
               })}
             </div>
@@ -479,6 +554,20 @@ export function ScanView({
           </table>
         </div>
       </motion.div>
+
+      <HitHistorySheet
+        isOpen={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        onSelectHit={(id) => {
+          setHistoryOpen(false);
+          setSelectedHit({ uid: id, entry: null });
+        }}
+      />
+      <HitDetailSheet
+        hitUid={selectedHit?.uid ?? null}
+        initial={selectedHit?.entry ?? null}
+        onClose={() => setSelectedHit(null)}
+      />
     </motion.div>
   );
 }

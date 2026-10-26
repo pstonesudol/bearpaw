@@ -42,6 +42,24 @@ export interface Preferences {
    * worse surprise than a UTC-stamped export of your local day.
    */
   activityExportTimezone: 'local' | 'utc';
+  /** Master switch for hit audio. Off by default: it needs a device and disk. */
+  audioRecordingEnabled: boolean;
+  /** Exact CoreAudio input name; '' means the system default. */
+  audioInputDevice: string;
+  audioPreRollMs: number;
+  audioPostRollMs: number;
+  audioMinDurationMs: number;
+  /** '' means `<app data>/recordings`. */
+  audioStorageDir: string;
+  /** 0 keeps audio until the hit's own retention removes the row. */
+  audioRetentionDays: number;
+  transcriptionEnabled: boolean;
+  transcriptionBinary: string;
+  transcriptionModel: string;
+  transcriptionLanguage: string;
+  /** '' means the backend's built-in railroad vocabulary. */
+  transcriptionVocabulary: string;
+  transcriptionThreads: number;
 }
 
 /**
@@ -124,6 +142,12 @@ export interface AppStore {
   setMemoryDraft: (index: number, draft: ChannelDraft) => void;
   clearMemoryDrafts: () => void;
   addToFullActivityLog: (entry: ActivityLogEntry) => void;
+  /**
+   * Merge a recording/transcript update into the live activity log by durable
+   * hit id. A no-op when the entry is not on screen: the detail and history
+   * views read the database directly, so nothing is lost by missing it.
+   */
+  updateActivityLogEntry: (hitUid: string, patch: Partial<ActivityLogEntry>) => void;
   hydrateActivityLogs: (
     entries: ActivityLogEntry[],
     options?: { replace?: boolean; preserveSince?: number },
@@ -141,6 +165,19 @@ const defaultPreferences: Preferences = {
   rereadMemoryOnConnect: true,
   analyticsScope: 'scanner',
   activityExportTimezone: 'local',
+  audioRecordingEnabled: false,
+  audioInputDevice: '',
+  audioPreRollMs: 500,
+  audioPostRollMs: 750,
+  audioMinDurationMs: 500,
+  audioStorageDir: '',
+  audioRetentionDays: 30,
+  transcriptionEnabled: true,
+  transcriptionBinary: '',
+  transcriptionModel: '',
+  transcriptionLanguage: 'en',
+  transcriptionVocabulary: '',
+  transcriptionThreads: 4,
 };
 
 /**
@@ -180,6 +217,19 @@ export function mapStoredPreferences(stored: Record<string, unknown>): Preferenc
     rereadMemoryOnConnect: prefs.reread_memory_on_connect ?? true,
     analyticsScope: prefs.analytics_scope === 'all' ? 'all' : 'scanner',
     activityExportTimezone: prefs.activity_export_timezone === 'utc' ? 'utc' : 'local',
+    audioRecordingEnabled: prefs.audio_recording_enabled ?? false,
+    audioInputDevice: prefs.audio_input_device ?? '',
+    audioPreRollMs: prefs.audio_pre_roll_ms ?? 500,
+    audioPostRollMs: prefs.audio_post_roll_ms ?? 750,
+    audioMinDurationMs: prefs.audio_min_duration_ms ?? 500,
+    audioStorageDir: prefs.audio_storage_dir ?? '',
+    audioRetentionDays: prefs.audio_retention_days ?? 30,
+    transcriptionEnabled: prefs.transcription_enabled ?? true,
+    transcriptionBinary: prefs.transcription_binary ?? '',
+    transcriptionModel: prefs.transcription_model ?? '',
+    transcriptionLanguage: prefs.transcription_language ?? 'en',
+    transcriptionVocabulary: prefs.transcription_vocabulary ?? '',
+    transcriptionThreads: prefs.transcription_threads ?? 4,
   };
 }
 
@@ -290,6 +340,13 @@ export const useStore = create<AppStore>((set) => ({
   addToFullActivityLog: (entry) =>
     set((prev) => ({
       fullActivityLog: [entry, ...prev.fullActivityLog],
+    })),
+
+  updateActivityLogEntry: (hitUid, patch) =>
+    set((prev) => ({
+      fullActivityLog: prev.fullActivityLog.map((entry) =>
+        entry.hit_uid === hitUid ? { ...entry, ...patch } : entry,
+      ),
     })),
 
   hydrateActivityLogs: (entries, options) =>

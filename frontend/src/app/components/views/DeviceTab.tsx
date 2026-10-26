@@ -11,6 +11,7 @@ import {
   Heart,
   Code,
   RefreshCw,
+  Mic,
 } from 'lucide-react';
 
 import appIcon from '@/assets/app-icon.png';
@@ -25,6 +26,7 @@ import { Slider } from '../ui/slider';
 import { Switch } from '../ui/switch';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
 import { SearchRangeEditSheet } from './SearchRangeEditSheet';
+import { AudioSettingsSheet } from './AudioSettingsSheet';
 import { KnownScanners } from './KnownScanners';
 
 type DeviceCategory =
@@ -68,6 +70,19 @@ export const PREFERENCE_KEY_MAP: Partial<Record<keyof Preferences, string>> = {
   rereadMemoryOnConnect: 'reread_memory_on_connect',
   analyticsScope: 'analytics_scope',
   activityExportTimezone: 'activity_export_timezone',
+  audioRecordingEnabled: 'audio_recording_enabled',
+  audioInputDevice: 'audio_input_device',
+  audioPreRollMs: 'audio_pre_roll_ms',
+  audioPostRollMs: 'audio_post_roll_ms',
+  audioMinDurationMs: 'audio_min_duration_ms',
+  audioStorageDir: 'audio_storage_dir',
+  audioRetentionDays: 'audio_retention_days',
+  transcriptionEnabled: 'transcription_enabled',
+  transcriptionBinary: 'transcription_binary',
+  transcriptionModel: 'transcription_model',
+  transcriptionLanguage: 'transcription_language',
+  transcriptionVocabulary: 'transcription_vocabulary',
+  transcriptionThreads: 'transcription_threads',
 };
 
 // Close Call (CLC) mode: UI value -> wire digit. Digits confirmed on hardware
@@ -211,6 +226,7 @@ export function DeviceTab({ onCheckForUpdates, checkingForUpdates }: DeviceTabPr
   const [removingFrequency, setRemovingFrequency] = useState<number | null>(null);
   const [lockedFetchedAt, setLockedFetchedAt] = useState<number | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<DeviceCategory>('Device Config');
+  const [audioSettingsOpen, setAudioSettingsOpen] = useState(false);
 
   const [firmware, setFirmware] = useState<string | null>(null);
   const [selectedChannels, setSelectedChannels] = useState<number[]>([]);
@@ -2086,6 +2102,38 @@ export function DeviceTab({ onCheckForUpdates, checkingForUpdates }: DeviceTabPr
                 </div>
               </section>
 
+              {/* Audio & Transcription. Every control lives in the sheet: this
+                  section is the summary and the way in, so the Preferences page
+                  does not grow a second scrolling column of device pickers. */}
+              <section className="space-y-4">
+                <h3 className="text-base font-bold text-white/80 flex items-center gap-2 uppercase tracking-wider">
+                  <Mic aria-hidden className="w-4 h-4 text-white/50" /> Audio &amp; Transcription
+                </h3>
+                <div className="bg-black/20 rounded-lg border border-white/5 p-4 space-y-4">
+                  <div className="flex items-center justify-between gap-6">
+                    <div className="space-y-0.5">
+                      <p className="text-base font-medium text-white">
+                        {preferences.audioRecordingEnabled
+                          ? 'Hit recording is on'
+                          : 'Hit recording is off'}
+                      </p>
+                      <p className="text-sm text-white/60">
+                        {preferences.transcriptionEnabled
+                          ? 'Recordings are transcribed locally after each transmission.'
+                          : 'Recording works without transcription.'}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setAudioSettingsOpen(true)}
+                      className="shrink-0 py-1.5 px-3 bg-black/20 hover:bg-black/40 rounded text-sm text-white/70 transition-colors border border-white/5"
+                    >
+                      Configure
+                    </button>
+                  </div>
+                </div>
+              </section>
+
               {/* Data Settings */}
               <section className="space-y-4">
                 <h3 className="text-base font-bold text-white/80 flex items-center gap-2 uppercase tracking-wider">
@@ -2119,6 +2167,8 @@ export function DeviceTab({ onCheckForUpdates, checkingForUpdates }: DeviceTabPr
           </div>
         )}
       </div>
+
+      <AudioSettingsSheet isOpen={audioSettingsOpen} onClose={() => setAudioSettingsOpen(false)} />
     </motion.div>
   );
 }
