@@ -509,29 +509,35 @@ most one open segment. Every rule follows from that:
    `UPDATE ... WHERE hit_uid` must find the row; its retry window is 5 × 20 ms
    by design. Reversing that order makes every recording look orphaned and
    deletes the files.
-3. **Nothing audio-related runs on the poll thread.** `hit_open`/`hit_close`
+3. **A segment that finishes before its row exists is held, not deleted.**
+   Device loss can finalize a transmission while the squelch is still open.
+   `hit_closed(uid, row_persisted)` is the handshake that then applies the
+   outcome or deletes the file, because a hit below `hit_min_duration` never
+   gets a row. Do not delete on "no row right now" — that was the bug that
+   silently lost audio and stranded rows at `recording`.
+4. **Nothing audio-related runs on the poll thread.** `hit_open`/`hit_close`
    push one event into a channel. Capture, WAV writing, SQLite updates and
    transcription each have their own thread. A stalled disk or vanished device
    delays a recording and nothing else.
-4. **Timing is measured in samples, not wall time.** Post-roll is "N more
+5. **Timing is measured in samples, not wall time.** Post-roll is "N more
    samples", so a blocked writer cannot stretch a segment and a file's duration
    is exactly its length ÷ sample rate.
-5. **A squelch open while a segment is still open is `partial` + `uncertain`.**
+6. **A squelch open while a segment is still open is `partial` + `uncertain`.**
    That is the frequency-changed-mid-squelch case a one-receiver scanner cannot
    express. Keep the audio, say the association is uncertain; never assign it
    silently to one frequency.
-6. **Files are written `<uid>.wav.part` and renamed after `finalize`.** A crash
+7. **Files are written `<uid>.wav.part` and renamed after `finalize`.** A crash
    leaves `.part`, swept at startup. Startup also turns a row still marked
    `recording` into `partial` (file exists) or `failed` (no file), and a `ready`
    row whose file is gone into `missing`.
-7. **The database stores a relative file name, never an absolute path.** The
+8. **The database stores a relative file name, never an absolute path.** The
    recordings root is a preference. `hit_store::safe_join` refuses absolute
    paths and `..`; do not bypass it — the database is not a trust boundary.
-8. **Transcription is an external process** (`whisper-cli` + a GGML model).
+9. **Transcription is an external process** (`whisper-cli` + a GGML model).
    A missing engine or model is a named job failure, never a startup or build
    failure, and recording works without it. Jobs are one-at-a-time and
    interrupted `processing` rows are requeued on the next launch.
-9. **Do not treat transcripts as authoritative.** The user's correction is
+10. **Do not treat transcripts as authoritative.** The user's correction is
    stored in `transcript`, the machine text in `transcript_original`. Never
    overwrite the original, and never present a transcript as confirmation of
    what was said.
