@@ -463,6 +463,38 @@ mod api_tests {
         assert!(hit["transcript"].is_null());
     }
 
+    /// The settings sheet writes through `PUT /preferences`; the running
+    /// recorder and transcription worker have to see that write.
+    #[tokio::test]
+    async fn an_audio_preference_write_reconfigures_the_live_services() {
+        let state = crate::api::default_state();
+        let (status, _, _) = call(
+            &state,
+            Method::PUT,
+            "/api/v1/preferences",
+            Some(json!({
+                "audio_pre_roll_ms": 900,
+                "transcription_enabled": false,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // The handler applies media settings on a blocking task so the response
+        // does not wait for a capture thread to stop. Give that task a moment;
+        // a fixed `sleep` would be flaky on a loaded runner.
+        for _ in 0..200 {
+            if state.recordings.settings().pre_roll == std::time::Duration::from_millis(900) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            state.recordings.settings().pre_roll,
+            std::time::Duration::from_millis(900)
+        );
+        assert!(!state.transcription.settings().enabled);
+    }
+
     #[tokio::test]
     async fn transcribing_a_hit_without_audio_conflicts() {
         let state = crate::api::default_state();

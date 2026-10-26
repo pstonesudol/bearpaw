@@ -12,6 +12,24 @@ fn persistence_failed(error: PreferencePersistenceError) -> ApiError {
     ApiError::Internal("preference_persistence_failed".to_string())
 }
 
+/// Does this key change how audio is captured or transcribed?
+///
+/// Only these writes restart or reconfigure the media services. A theme change
+/// must not stop and start the capture thread.
+fn is_media_preference(key: &str) -> bool {
+    key.starts_with("audio_") || key.starts_with("transcription_")
+}
+
+/// Apply media settings off the request's async worker.
+///
+/// `apply_media_preferences` can join the capture thread, so it is blocking
+/// work. Fire-and-forget: the response does not wait for capture to settle, and
+/// the settings sheet re-reads `/audio/devices` for the resulting state.
+fn apply_media_preferences(state: &AppState) {
+    let state = state.clone();
+    let _ = tokio::task::spawn_blocking(move || state.apply_media_preferences());
+}
+
 pub(crate) async fn get_preferences(State(state): State<AppState>) -> Json<Value> {
     Json(Value::Object(state.preferences.lock().unwrap().clone()))
 }
@@ -43,6 +61,9 @@ pub(crate) async fn put_preference(
         .lock()
         .unwrap()
         .insert(key.clone(), value.clone());
+    if is_media_preference(&key) {
+        apply_media_preferences(&state);
+    }
     Ok(Json(json!({ "key": key, "value": value })))
 }
 
@@ -56,9 +77,15 @@ pub(crate) async fn put_preferences(
         ));
     };
     save_preferences_to_db(&state.preferences_db_path, &map).map_err(persistence_failed)?;
+    let media_changed = map.keys().any(|key| is_media_preference(key));
     let mut prefs = state.preferences.lock().unwrap();
     prefs.extend(map);
-    Ok(Json(Value::Object(prefs.clone())))
+    let updated = prefs.clone();
+    drop(prefs);
+    if media_changed {
+        apply_media_preferences(&state);
+    }
+    Ok(Json(Value::Object(updated)))
 }
 
 pub(crate) async fn reset_preferences(
@@ -66,6 +93,7 @@ pub(crate) async fn reset_preferences(
 ) -> Result<Json<Value>, ApiError> {
     reset_preferences_db(&state.preferences_db_path).map_err(persistence_failed)?;
     *state.preferences.lock().unwrap() = default_preferences();
+    apply_media_preferences(&state);
     Ok(Json(Value::Object(
         state.preferences.lock().unwrap().clone(),
     )))

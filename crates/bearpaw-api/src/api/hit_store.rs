@@ -10,7 +10,6 @@ use std::path::{Component, Path, PathBuf};
 
 use rusqlite::{params, OptionalExtension, Row};
 use serde::Deserialize;
-use serde_json::Value;
 
 use super::{open_sqlite, ActivityHit, ScannerMode};
 

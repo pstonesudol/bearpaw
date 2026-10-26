@@ -94,6 +94,24 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Push the audio and transcription preferences into the live services.
+    ///
+    /// Preferences are stored generically, so without this the recorder and the
+    /// transcription worker keep the values they had at launch: changing the
+    /// model, device or vocabulary appears saved and does nothing until the
+    /// next restart. Called only for `audio_*` / `transcription_*` writes.
+    ///
+    /// Blocking: stopping capture joins its thread. HTTP handlers call this on
+    /// a blocking task, never on a runtime worker.
+    pub fn apply_media_preferences(&self) {
+        let prefs = self.preferences.lock().unwrap().clone();
+        let data_dir = default_data_dir();
+        let (recording_settings, root) = RecordingSettings::from_preferences(&prefs, &data_dir);
+        self.recordings.apply_settings(recording_settings, root);
+        self.transcription
+            .update_settings(TranscriptionSettings::from_preferences(&prefs, &data_dir));
+    }
+
     /// Capabilities of the connected scanner, or the BC125AT-family defaults.
     ///
     /// Defaults rather than `None` so callers never handle a third state that
@@ -927,7 +945,7 @@ pub fn default_state() -> AppState {
 
     let (ws_tx, _) = broadcast::channel(64);
     let data_dir = default_data_dir();
-    let (recording_settings, recordings_root) =
+    let (recording_settings, configured_recordings_root) =
         RecordingSettings::from_preferences(&loaded_preferences, &data_dir);
     let transcription_settings =
         TranscriptionSettings::from_preferences(&loaded_preferences, &data_dir);
@@ -936,6 +954,8 @@ pub fn default_state() -> AppState {
     // release build at all.
     #[cfg(test)]
     let recordings_root = unique_test_dir("recordings");
+    #[cfg(not(test))]
+    let recordings_root = configured_recordings_root;
     let recordings_root = Arc::new(Mutex::new(recordings_root));
     let transcription = TranscriptionService::new(
         Arc::new(analytics_db_path.clone()),
@@ -4901,6 +4921,32 @@ mod tests {
             "recording is off by default, so the row must not promise audio"
         );
         assert_eq!(hit.transcript_status, "none");
+    }
+
+    /// Saving an audio/transcription preference must reach the running
+    /// services. Before this, the settings snapshot was taken once at launch:
+    /// the UI showed a saved model and the worker kept using the old one.
+    #[test]
+    fn media_preferences_reach_the_live_services() {
+        let state = default_state();
+        {
+            let mut prefs = state.preferences.lock().unwrap();
+            prefs.insert("audio_pre_roll_ms".to_string(), json!(900));
+            prefs.insert("transcription_enabled".to_string(), json!(false));
+            prefs.insert(
+                "transcription_model".to_string(),
+                json!("ggml-small.en.bin"),
+            );
+        }
+        state.apply_media_preferences();
+
+        assert_eq!(
+            state.recordings.settings().pre_roll,
+            Duration::from_millis(900)
+        );
+        let transcription = state.transcription.settings();
+        assert!(!transcription.enabled);
+        assert_eq!(transcription.model, "ggml-small.en.bin");
     }
 
     #[test]

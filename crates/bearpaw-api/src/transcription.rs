@@ -481,9 +481,22 @@ impl TranscriptionService {
         })
     }
 
+    /// Replace the settings snapshot the worker reads before each job.
+    ///
+    /// Re-enabling after a disabled period re-queues anything still `pending`:
+    /// jobs skipped while transcription was off are harmless to repeat (a
+    /// completed row is skipped unless forced) and leaving them queued forever
+    /// would show "Queued" with no worker to run them.
     pub fn update_settings(&self, settings: TranscriptionSettings) {
+        let was_enabled = self.settings().enabled;
         if let Ok(mut slot) = self.settings.lock() {
-            *slot = settings;
+            *slot = settings.clone();
+        }
+        if settings.enabled && !was_enabled {
+            self.start();
+            for uid in hit_store::pending_transcription_uids(&self.db_path) {
+                self.enqueue(&uid);
+            }
         }
     }
 
