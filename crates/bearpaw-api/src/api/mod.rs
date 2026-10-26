@@ -1233,9 +1233,10 @@ pub(crate) fn track_analytics_transition(state: &AppState, live: &LiveState, pre
         };
         if let Some(open_hit) = open_hit {
             let duration = (live.timestamp - open_hit.timestamp).max(0.0);
-            if duration >= min_hit_duration(state) {
+            let hit_uid = open_hit.hit_uid.clone();
+            let row_persisted = duration >= min_hit_duration(state);
+            if row_persisted {
                 let id = state.next_hit_id.fetch_add(1, Ordering::Relaxed) + 1;
-                let hit_uid = open_hit.hit_uid.clone();
                 let entry = ActivityHit {
                     id: id.to_string(),
                     timestamp: open_hit.timestamp,
@@ -1270,6 +1271,11 @@ pub(crate) fn track_analytics_transition(state: &AppState, live: &LiveState, pre
                 // short by design.
                 insert_analytics_hit(&state.analytics_db_path, &entry);
             }
+            // Tell the recorder whether a row exists. A segment that finished
+            // early (device loss, recording disabled mid-hit) is applied here,
+            // or its file is deleted when the hit is below the activity
+            // minimum and no row will ever exist.
+            state.recordings.hit_closed(&hit_uid, row_persisted);
             state.recordings.hit_close();
         }
     }

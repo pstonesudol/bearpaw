@@ -82,9 +82,12 @@ to convention:
   leaves a `.part`, which startup reconciliation deletes. A row still marked
   `recording` is reconciled at startup: the file becomes `partial` if it exists,
   otherwise the row becomes `failed` with `recording_interrupted`.
-- **A recording file with no hit row is deleted**, not kept: the segmenter only
-  discards below-minimum hits after the row is known to be absent, and the
-  orphan sweep covers the crash case. Bearpaw is offline-first and starts with no network, so a
+- **A finished segment with no hit row yet is held, not deleted.** A device
+  loss can finish a segment before the squelch-close tick writes the row. The
+  recorder keeps the outcome until the close handler reports whether a row was
+  written: if it was, the result is applied; if the hit was below the activity
+  minimum, the file is deleted. Nothing is deleted on the assumption that a row
+  will never arrive. Bearpaw is offline-first and starts with no network, so a
   failure must be visible without being a blocking dialog.
 
 ## Persistence Guarantees

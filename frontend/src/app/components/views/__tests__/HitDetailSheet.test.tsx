@@ -162,6 +162,30 @@ describe('HitDetailSheet', () => {
     expect(await screen.findByText('Recording deleted')).toBeInTheDocument();
   });
 
+  it('clears the previous hit while the next one loads', async () => {
+    const { rerender } = render(<HitDetailSheet hitUid="h-1" onClose={onClose} />);
+    await screen.findByText('Amtrak 215 clear at Zoo');
+
+    let resolveSecond: ((hit: HitDetail) => void) | undefined;
+    vi.mocked(getHit).mockImplementationOnce(
+      () =>
+        new Promise<HitDetail>((resolve) => {
+          resolveSecond = resolve;
+        }),
+    );
+    rerender(<HitDetailSheet hitUid="h-2" onClose={onClose} />);
+
+    // The previous hit's transcript, player and actions must not remain under
+    // the new id while its own request is in flight.
+    await waitFor(() =>
+      expect(screen.queryByText('Amtrak 215 clear at Zoo')).not.toBeInTheDocument(),
+    );
+    expect(document.querySelector('audio')).toBeNull();
+
+    resolveSecond?.({ ...baseHit, hit_uid: 'h-2', transcript: 'SEPTA 421 clear' });
+    expect(await screen.findByText('SEPTA 421 clear')).toBeInTheDocument();
+  });
+
   it('explains why a too-short transmission has no audio', async () => {
     vi.mocked(getHit).mockResolvedValue({
       ...baseHit,

@@ -242,16 +242,22 @@ pub(crate) async fn post_transcribe(
     let hit = hit_store::get_hit(&state.analytics_db_path, &key)
         .ok_or_else(|| ApiError::NotFound("hit_not_found".to_string()))?;
     let Some(uid) = hit.hit_uid else {
-        return Err(ApiError::Conflict("hit_has_no_recording".to_string()));
+        return Err(ApiError::Conflict("recording_not_available".to_string()));
     };
     if !matches!(hit.recording_status.as_str(), "ready" | "partial") {
         return Err(ApiError::Conflict("recording_not_available".to_string()));
     }
+    if !state.transcription.settings().enabled {
+        // Queueing with no worker to run it leaves the row `pending` forever,
+        // which the detail sheet would poll indefinitely.
+        return Err(ApiError::Conflict("transcription_disabled".to_string()));
+    }
     let force = body.map(|Json(b)| b.force).unwrap_or(false);
-    // Queue first, then mark pending: a job that starts instantly would set
-    // `processing` and this write would put it back to `pending`.
-    state.transcription.retry(&uid, force);
+    // Mark pending BEFORE queueing. The worker sets `processing` as soon as it
+    // starts; a write after the send could land second and leave a finished or
+    // in-flight job labelled `pending` until the next launch.
     hit_store::set_transcript_status(&state.analytics_db_path, &uid, "pending", None, false);
+    state.transcription.retry(&uid, force);
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({ "hit_uid": uid, "transcript_status": "pending" })),
@@ -518,6 +524,30 @@ mod api_tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(json(&body)["error"], "recording_not_available");
+    }
+
+    #[tokio::test]
+    async fn transcribing_is_refused_when_the_feature_is_off() {
+        let (state, _root) = seeded();
+        state
+            .preferences
+            .lock()
+            .unwrap()
+            .insert("transcription_enabled".to_string(), json!(false));
+        state.apply_media_preferences();
+
+        let (status, _, body) = call(
+            &state,
+            Method::POST,
+            "/api/v1/hits/h-api/transcribe",
+            Some(json!({ "force": false })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(json(&body)["error"], "transcription_disabled");
+        // No stale "pending" left behind for a job that will never run.
+        let hit = hit_store::get_hit(&state.analytics_db_path, "h-api").unwrap();
+        assert_eq!(hit.transcript_status, "none");
     }
 
     #[tokio::test]

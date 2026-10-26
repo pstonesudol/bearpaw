@@ -151,10 +151,21 @@ pub(crate) fn set_transcript_completed(
         return false;
     };
     let now = super::epoch_now();
+    // `transcript_original` always becomes the latest machine output; the
+    // displayed `transcript` is replaced only when the user has not corrected
+    // it. A correction is the user's work — retranscribing must not silently
+    // discard it, and the fresh machine text is still available under
+    // "Machine transcript". Both `CASE` arms read the OLD row values in SQLite,
+    // so the comparison is against the pre-update state.
     conn.execute(
-        "UPDATE scan_hits SET transcript = ?2, transcript_status = 'completed', \
+        "UPDATE scan_hits SET \
+         transcript = CASE \
+             WHEN transcript_original IS NOT NULL AND transcript IS NOT transcript_original \
+             THEN transcript ELSE ?2 END, \
+         transcript_original = ?2, \
+         transcript_status = 'completed', \
          transcript_engine = ?3, transcript_error = NULL, transcript_attempts = 0, \
-         transcript_original = COALESCE(transcript_original, ?2), updated_at = ?4 \
+         updated_at = ?4 \
          WHERE hit_uid = ?1",
         params![hit_uid, text, engine, now],
     )
@@ -287,10 +298,13 @@ pub(crate) fn list_hits(db_path: &str, filter: &HitFilter) -> (Vec<ActivityHit>,
         values.push(Box::new(status.to_string()));
     }
     if let Some(has_recording) = filter.has_recording {
+        // Status, not "has a path": a `missing` or `deleted` row can still
+        // carry the old path, and a user filtering for playable audio does not
+        // want a file that is gone.
         clauses.push(if has_recording {
-            "recording_path IS NOT NULL".to_string()
+            "COALESCE(recording_status, 'none') IN ('ready', 'partial')".to_string()
         } else {
-            "recording_path IS NULL".to_string()
+            "COALESCE(recording_status, 'none') NOT IN ('ready', 'partial')".to_string()
         });
     }
     if let Some(scanner) = filter.scanner_id.as_deref().filter(|s| !s.is_empty()) {
@@ -664,15 +678,30 @@ mod tests {
         );
     }
 
+    /// Retranscribing must not silently throw away the user's correction. The
+    /// new machine output belongs in `transcript_original`; the correction is
+    /// the displayed text.
     #[test]
-    fn retranscription_does_not_replace_an_edit() {
+    fn retranscription_keeps_a_correction_and_refreshes_the_machine_text() {
         let (db, _root) = seed();
         set_transcript_completed(&db, "h-1", "machine one", "whisper-cli");
         edit_transcript(&db, "h-1", "human correction");
         set_transcript_completed(&db, "h-1", "machine two", "whisper-cli");
         let row = get_hit(&db, "h-1").unwrap();
+        assert_eq!(row.transcript.as_deref(), Some("human correction"));
+        assert_eq!(row.transcript_original.as_deref(), Some("machine two"));
+    }
+
+    #[test]
+    fn retranscription_replaces_text_when_there_is_no_correction() {
+        let (db, _root) = seed();
+        set_transcript_completed(&db, "h-1", "machine one", "whisper-cli");
+        set_transcript_completed(&db, "h-1", "machine two", "whisper-cli");
+        let row = get_hit(&db, "h-1").unwrap();
         assert_eq!(row.transcript.as_deref(), Some("machine two"));
-        assert_eq!(row.transcript_original.as_deref(), Some("machine one"));
+        // The stored original equals the displayed text, so the API hides it:
+        // "Machine transcript" is only interesting when it differs.
+        assert!(row.transcript_original.is_none());
     }
 
     #[test]

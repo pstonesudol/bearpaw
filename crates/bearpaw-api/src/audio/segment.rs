@@ -183,8 +183,18 @@ struct ActiveSegment {
     /// Samples received while the squelch was open. This is the only count the
     /// minimum-duration gate may use.
     live_samples: u64,
+    /// Post-roll samples still owed. Captured at open so a settings change
+    /// mid-transmission cannot mix two rules in one file.
+    post_roll_samples: u64,
     post_roll_left: u64,
+    /// The minimum-duration gate, also fixed at open.
+    min_transmission_samples: u64,
     closing: bool,
+    /// Wall-clock start of the post-roll. Only a backstop: normally the sample
+    /// count finishes the segment. A device that stops delivering frames after
+    /// `HitClose` would otherwise hold a `.part` and a `recording` row open
+    /// until the next transmission.
+    closing_since: Option<std::time::Instant>,
     confidence: LinkConfidence,
     error: Option<String>,
     write_failed: bool,
@@ -248,10 +258,34 @@ impl SegmentEngine {
         std::mem::take(&mut self.outcomes)
     }
 
-    /// Whether a segment is currently being written. Used by the test-recording
-    /// endpoint to refuse while a hit is in flight.
+    /// Whether a segment is open. Test-only: production asks the outcome
+    /// handshake, not the engine, and the engine lives on its own thread.
+    #[cfg(test)]
     pub fn is_capturing(&self) -> bool {
         self.active.is_some()
+    }
+
+    /// Finish a post-roll that has stopped receiving frames.
+    ///
+    /// The normal path is sample-driven: post-roll is N more samples. If the
+    /// audio device disappears after `HitClose`, those samples never arrive and
+    /// the segment would stay open forever. The worker calls this on its idle
+    /// timeout; the grace is generous relative to the configured post-roll so
+    /// an ordinary callback gap cannot cut a transmission short.
+    pub fn force_stale_close(&mut self) {
+        let Some(seg) = self.active.as_ref() else {
+            return;
+        };
+        let Some(since) = seg.closing_since else {
+            return;
+        };
+        let limit = self.cfg.post_roll + Duration::from_secs(1);
+        if since.elapsed() < limit {
+            return;
+        }
+        if let Some(seg) = self.active.take() {
+            self.finish(seg, SegmentStatus::Ready);
+        }
     }
 
     fn push_samples(&mut self, samples: &[f32]) {
@@ -361,8 +395,11 @@ impl SegmentEngine {
             writer: Some(writer),
             samples: 0,
             live_samples: 0,
+            post_roll_samples: self.cfg.post_roll_samples(),
             post_roll_left: 0,
+            min_transmission_samples: self.cfg.min_transmission_samples(),
             closing: false,
+            closing_since: None,
             confidence: LinkConfidence::Exact,
             error: None,
             write_failed: false,
@@ -391,7 +428,8 @@ impl SegmentEngine {
             return;
         }
         active.closing = true;
-        active.post_roll_left = self.cfg.post_roll_samples();
+        active.closing_since = Some(std::time::Instant::now());
+        active.post_roll_left = active.post_roll_samples;
         if active.post_roll_left == 0 {
             if let Some(seg) = self.active.take() {
                 self.finish(seg, SegmentStatus::Ready);
@@ -482,7 +520,7 @@ impl SegmentEngine {
             return;
         }
 
-        if live_samples < self.cfg.min_transmission_samples() {
+        if live_samples < seg.min_transmission_samples {
             let _ = fs::remove_file(&seg.part_path);
             self.outcomes.push(SegmentOutcome::Discarded {
                 hit_uid,

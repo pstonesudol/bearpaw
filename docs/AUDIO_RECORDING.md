@@ -163,9 +163,12 @@ mistaken for a recording.
   `link_confidence = uncertain` rather than silently assigned to one frequency.
 * **Device loss** finishes the active segment as `partial`. The scanner keeps
   scanning; only recording is affected.
-* **No audio** (device denied, unplugged, or never started) leaves the hit row
-  with `recording_status = failed` and an error string. It never deletes or
-  hides the hit.
+* **No audio** (device denied, unplugged before the hit, or recording off)
+  leaves the hit row with `recording_status = none`. A segment that *started*
+  and then lost the device is kept as `partial`; if it finishes before the
+  hit row exists (the squelch was still open), the outcome is held until the
+  close handler reports whether a row was written, so the bytes are never
+  deleted and the row is never left claiming `recording`.
 
 ## Transcription semantics
 
@@ -256,7 +259,8 @@ record the outcome in the PR.
    Activity Monitor and no network traffic is generated.
 10. **Restart** — hit, audio, and transcript survive a full quit and relaunch;
     a job killed mid-flight is `pending` and completes after relaunch.
-11. **Retention** — set retention to 0 days (delete) and confirm audio goes
-    while the hit and transcript remain.
+11. **Retention** — set retention to 1 day, age a file past it (or delete one
+    recording by hand) and confirm the audio goes while the hit and transcript
+    remain. `0` means "keep until the hit ages out", not "delete now".
 12. **CPU** — record a 10-minute monitoring session and note CPU and disk in
     Activity Monitor.

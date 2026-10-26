@@ -6,6 +6,7 @@
 //! only push an event into a channel; a stalled disk, a dead audio device, or a
 //! database that is temporarily locked can delay a recording and nothing else.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
@@ -137,6 +138,24 @@ pub struct SweepReport {
     pub retention_rows_marked: usize,
 }
 
+/// Segments that finished before their hit row existed, and hits whose final
+/// disposition the poll thread has reported.
+///
+/// A device can drop mid-transmission, so a segment can finalize *before* the
+/// squelch closes and the row is inserted. Deleting that file (the old
+/// behaviour) lost the audio and left the row stuck at `recording`; keeping it
+/// without a row would orphan it. The two maps are the handshake: whichever
+/// side arrives second applies the outcome.
+#[derive(Default)]
+struct PendingOutcomes {
+    /// `hit_uid -> finished outcome`, when the database update found no row.
+    pending: HashMap<String, SegmentOutcome>,
+    /// `hit_uid -> was the row persisted?` reported by the poll thread.
+    closed: HashMap<String, bool>,
+}
+
+const MAX_PENDING_OUTCOMES: usize = 64;
+
 #[derive(Default)]
 struct ServiceInner {
     bus: Option<EventBus>,
@@ -153,6 +172,11 @@ pub struct RecordingService {
     root: Arc<Mutex<PathBuf>>,
     settings: Mutex<RecordingSettings>,
     active_uid: Mutex<Option<String>>,
+    /// Serialises `apply_settings`: two slider commits can land on different
+    /// blocking tasks, and interleaved stop/start would leave the capture
+    /// thread and the stored settings disagreeing.
+    apply_lock: Mutex<()>,
+    pending: Arc<Mutex<PendingOutcomes>>,
 }
 
 impl RecordingService {
@@ -172,6 +196,8 @@ impl RecordingService {
             root,
             settings: Mutex::new(settings),
             active_uid: Mutex::new(None),
+            apply_lock: Mutex::new(()),
+            pending: Arc::new(Mutex::new(PendingOutcomes::default())),
         })
     }
 
@@ -192,8 +218,14 @@ impl RecordingService {
     /// the segmenter and take effect on the next transmission; a file already
     /// being written keeps the settings it started with.
     pub fn apply_settings(&self, settings: RecordingSettings, root: PathBuf) {
+        let _apply = self.apply_lock.lock();
         let previous = self.settings();
+        let previous_root = self.root();
         let device_changed = previous.device != settings.device;
+        // The segmenter captured its output directory at `start`. Moving the
+        // library without restarting it would write new files to the old root
+        // while every read resolves against the new one, making them invisible.
+        let root_changed = previous_root != root;
         if let Ok(mut slot) = self.settings.lock() {
             *slot = settings.clone();
         }
@@ -211,7 +243,7 @@ impl RecordingService {
             .lock()
             .map(|inner| inner.capture.is_some())
             .unwrap_or(false);
-        if running && device_changed {
+        if running && (device_changed || root_changed) {
             self.stop();
         }
         self.start();
@@ -241,6 +273,7 @@ impl RecordingService {
             ws_tx: self.ws_tx.clone(),
             transcription: self.transcription.clone(),
             root: self.root.clone(),
+            pending: self.pending.clone(),
         };
         let worker_bus = bus.clone();
         let worker = thread::Builder::new()
@@ -316,11 +349,57 @@ impl RecordingService {
     /// `recording` and the worker updates it. If recording is off, the row is
     /// `none` and no worker will ever touch it.
     pub fn initial_status(&self, hit_uid: &str) -> &'static str {
+        // A segment that already finished (device loss, disabled mid-hit) is
+        // reported with its terminal status so the row is born correct instead
+        // of claiming `recording` forever.
+        if let Ok(pending) = self.pending.lock() {
+            if let Some(outcome) = pending.pending.get(hit_uid) {
+                return match outcome {
+                    SegmentOutcome::Finalized { status, .. } => status.as_str(),
+                    SegmentOutcome::Discarded { .. } => "too_short",
+                    SegmentOutcome::Failed { .. } => "failed",
+                };
+            }
+        }
         let active = self.active_uid.lock().ok().and_then(|slot| slot.clone());
         if active.as_deref() == Some(hit_uid) {
             "recording"
         } else {
             "none"
+        }
+    }
+
+    /// Tell the recorder whether the hit row exists.
+    ///
+    /// Must be called after `insert_analytics_hit` (or after deciding the hit is
+    /// below the activity minimum). If a segment finished earlier, this is what
+    /// applies its result — or deletes the audio when no row will ever exist.
+    pub fn hit_closed(&self, hit_uid: &str, row_persisted: bool) {
+        let outcome = {
+            let Ok(mut pending) = self.pending.lock() else {
+                return;
+            };
+            pending.closed.insert(hit_uid.to_string(), row_persisted);
+            pending.pending.remove(hit_uid)
+        };
+        if let Some(outcome) = outcome {
+            let sink = RecordingSink {
+                db_path: self.db_path.clone(),
+                ws_tx: self.ws_tx.clone(),
+                transcription: self.transcription.clone(),
+                root: self.root.clone(),
+                pending: self.pending.clone(),
+            };
+            // Never do the retry window on the poll thread: this is called from
+            // `track_analytics_transition`, and a deferred outcome is the one
+            // path in it that can block on SQLite. Rare (device loss mid-hit),
+            // so a short-lived thread is cheaper than a queue in the service.
+            let spawned = thread::Builder::new()
+                .name("bearpaw-recording-close".to_string())
+                .spawn(move || sink.resolve_deferred(outcome, row_persisted));
+            if spawned.is_err() {
+                tracing::warn!("could not spawn the deferred-recording resolver");
+            }
         }
     }
 
@@ -369,11 +448,19 @@ impl RecordingService {
     }
 
     /// Startup and daily housekeeping: interrupted rows, missing files, stale
-    /// `.part` files, orphans and retention. Idempotent; safe to call at any
-    /// time, including while recording.
+    /// `.part` files, orphans and retention.
+    ///
+    /// Safe to run while recording: `.part` files younger than five minutes and
+    /// the live hit's row are left alone.
     pub fn reconcile(&self) -> SweepReport {
         let root = self.root();
         let mut report = SweepReport::default();
+        let active_uid = self.active_uid.lock().ok().and_then(|uid| uid.clone());
+        // A `.part` younger than this may belong to a transmission that is
+        // still being written. The daily sweep runs while the app is live, so
+        // deleting by extension alone would unlink a file mid-post-roll and
+        // make its rename fail.
+        const PART_GRACE: Duration = Duration::from_secs(300);
 
         // 1. Half-written files are never a recording. A crash between create
         //    and rename leaves one; the row that would have pointed at it is
@@ -381,10 +468,21 @@ impl RecordingService {
         if let Ok(entries) = std::fs::read_dir(&root) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("part") {
-                    if std::fs::remove_file(&path).is_ok() {
-                        report.partial_files_removed += 1;
-                    }
+                if path.extension().and_then(|e| e.to_str()) != Some("part") {
+                    continue;
+                }
+                let old_enough = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .map(|modified| {
+                        SystemTime::now()
+                            .duration_since(modified)
+                            .map(|age| age > PART_GRACE)
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                if old_enough && std::fs::remove_file(&path).is_ok() {
+                    report.partial_files_removed += 1;
                 }
             }
         }
@@ -393,6 +491,11 @@ impl RecordingService {
         //    crash, a power loss, or a device error that never delivered an
         //    outcome. Recover the bytes if they exist.
         for (hit_uid, recorded_path) in hit_store::interrupted_recordings(&self.db_path) {
+            // The live hit's row is legitimately `recording`; the segmenter
+            // owns it until the close.
+            if active_uid.as_deref() == Some(hit_uid.as_str()) {
+                continue;
+            }
             // A row that never got a path still has a predictable file name:
             // the segmenter names every file after the hit uid.
             let file = recorded_path.unwrap_or_else(|| format!("{hit_uid}.wav"));
@@ -455,7 +558,18 @@ impl RecordingService {
         let cutoff = SystemTime::now()
             .checked_sub(Duration::from_secs(24 * 3600))
             .unwrap_or(SystemTime::UNIX_EPOCH);
-        if let Ok(entries) = std::fs::read_dir(&root) {
+        // Test clips live one level down and are never referenced by a row, so
+        // they need the same age-gated sweep; otherwise every "Test recording"
+        // leaves a WAV behind forever.
+        let mut scan_dirs = vec![root.clone()];
+        let tests_dir = root.join("_tests");
+        if tests_dir.is_dir() {
+            scan_dirs.push(tests_dir);
+        }
+        for dir in scan_dirs {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
             for entry in entries.flatten() {
                 let path = entry.path();
                 if !path.is_file() {
@@ -467,16 +581,12 @@ impl RecordingService {
                 if path.extension().and_then(|e| e.to_str()) == Some("part") {
                     continue;
                 }
-                let test_clip = path
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .is_some_and(|p| p == "_tests");
-                let referenced_elsewhere = referenced.contains(&name)
-                    || (test_clip
-                        && referenced
-                            .iter()
-                            .any(|r| r.ends_with(&format!("_tests/{name}"))));
-                if referenced_elsewhere {
+                let reference = if dir == root {
+                    name.clone()
+                } else {
+                    format!("_tests/{name}")
+                };
+                if referenced.contains(&reference) {
                     continue;
                 }
                 let old_enough = entry
@@ -525,6 +635,7 @@ struct RecordingSink {
     ws_tx: broadcast::Sender<String>,
     transcription: Arc<TranscriptionService>,
     root: Arc<Mutex<PathBuf>>,
+    pending: Arc<Mutex<PendingOutcomes>>,
 }
 
 impl RecordingSink {
@@ -551,22 +662,68 @@ impl RecordingSink {
                         error.as_deref(),
                     )
                 });
-                if !stored {
-                    // No hit row: the transmission was below `hit_min_duration`
-                    // or the database went away. Keeping the file would leave
-                    // an orphan with no history to belong to.
-                    self.delete_file(&file_name);
+                if stored {
+                    self.broadcast(
+                        &hit_uid,
+                        status.as_str(),
+                        Some(duration_secs),
+                        Some(confidence.as_str()),
+                        error.as_deref(),
+                    );
+                    if matches!(status, SegmentStatus::Ready | SegmentStatus::Partial) {
+                        self.transcription.enqueue(&hit_uid);
+                    }
                     return;
                 }
-                self.broadcast(
-                    &hit_uid,
-                    status.as_str(),
-                    Some(duration_secs),
-                    Some(confidence.as_str()),
-                    error.as_deref(),
-                );
-                if matches!(status, SegmentStatus::Ready | SegmentStatus::Partial) {
-                    self.transcription.enqueue(&hit_uid);
+
+                // No row yet. A device loss can finish the segment before the
+                // squelch-close tick inserts the row, so deleting here lost the
+                // audio and stranded the row at `recording`. Ask the handshake.
+                let deferred = SegmentOutcome::Finalized {
+                    hit_uid: hit_uid.clone(),
+                    file_name: file_name.clone(),
+                    duration_secs,
+                    bytes,
+                    status,
+                    confidence,
+                    error: error.clone(),
+                };
+                let disposition = {
+                    let Ok(mut pending) = self.pending.lock() else {
+                        return;
+                    };
+                    match pending.closed.get(&hit_uid).copied() {
+                        Some(row_persisted) => Some(row_persisted),
+                        None => {
+                            if pending.pending.len() >= MAX_PENDING_OUTCOMES {
+                                // Bounded: a lost close (scanner unplugged while
+                                // the squelch was open) must not grow forever.
+                                // The file is still swept as an orphan.
+                                if let Some(oldest) = pending.pending.keys().next().cloned() {
+                                    pending.pending.remove(&oldest);
+                                }
+                            }
+                            pending.pending.insert(hit_uid.clone(), deferred);
+                            None
+                        }
+                    }
+                };
+                match disposition {
+                    Some(row_persisted) => {
+                        self.resolve_deferred(
+                            SegmentOutcome::Finalized {
+                                hit_uid,
+                                file_name,
+                                duration_secs,
+                                bytes,
+                                status,
+                                confidence,
+                                error,
+                            },
+                            row_persisted,
+                        );
+                    }
+                    None => {}
                 }
             }
             SegmentOutcome::Discarded {
@@ -600,6 +757,64 @@ impl RecordingSink {
                 );
                 self.broadcast(&hit_uid, "failed", None, None, Some(&error));
             }
+        }
+    }
+
+    /// Apply an outcome whose row has just been decided.
+    ///
+    /// `row_persisted = false` means the hit never became a row (below the
+    /// activity minimum), so the audio has nothing to belong to and is deleted.
+    /// `true` retries longer than the hot path: the row was inserted moments
+    /// ago on another thread, and unlike the normal case there is no further
+    /// event that could apply it later.
+    fn resolve_deferred(&self, outcome: SegmentOutcome, row_persisted: bool) {
+        let SegmentOutcome::Finalized {
+            hit_uid,
+            file_name,
+            duration_secs,
+            bytes,
+            status,
+            confidence,
+            error,
+        } = outcome
+        else {
+            return;
+        };
+        if !row_persisted {
+            self.delete_file(&file_name);
+            return;
+        }
+        let stored = update_with_retry_long(|| {
+            hit_store::set_recording_outcome(
+                &self.db_path,
+                &hit_uid,
+                Some(&file_name),
+                status.as_str(),
+                Some(confidence.as_str()),
+                Some(duration_secs),
+                Some(bytes),
+                error.as_deref(),
+            )
+        });
+        if stored {
+            self.broadcast(
+                &hit_uid,
+                status.as_str(),
+                Some(duration_secs),
+                Some(confidence.as_str()),
+                error.as_deref(),
+            );
+            if matches!(status, SegmentStatus::Ready | SegmentStatus::Partial) {
+                self.transcription.enqueue(&hit_uid);
+            }
+        } else {
+            // Keep the bytes: `reconcile` finds a `recording` row beside a
+            // `<uid>.wav` and turns it into `partial`. Deleting here is the bug
+            // this whole path exists to avoid.
+            tracing::warn!(
+                hit_uid,
+                "recording kept but its row could not be updated; reconciliation will recover it"
+            );
         }
     }
 
@@ -649,13 +864,39 @@ fn update_with_retry(mut attempt: impl FnMut() -> bool) -> bool {
     false
 }
 
+/// A longer window for the deferred case, where the row is known to be new and
+/// no later event will apply the outcome.
+fn update_with_retry_long(mut attempt: impl FnMut() -> bool) -> bool {
+    for _ in 0..20 {
+        if attempt() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    false
+}
+
 fn segment_worker(
     rx: Receiver<SegmentEvent>,
     mut engine: SegmentEngine,
     sink: RecordingSink,
     bus: EventBus,
 ) {
-    while let Ok(event) = rx.recv() {
+    loop {
+        let event = match rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(event) => event,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // No frames for half a second: either the scanner is quiet (the
+                // common case) or the device is gone with a post-roll still
+                // owed. The engine decides whether that post-roll has run long.
+                engine.force_stale_close();
+                for outcome in engine.drain() {
+                    sink.persist(outcome);
+                }
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         let is_samples = matches!(event, SegmentEvent::Samples(_));
         let is_stop = matches!(event, SegmentEvent::Stop);
         engine.handle(event);
@@ -778,6 +1019,7 @@ mod tests {
             ws_tx: ws.clone(),
             transcription,
             root,
+            pending: Arc::new(Mutex::new(PendingOutcomes::default())),
         }
     }
 
@@ -810,27 +1052,105 @@ mod tests {
         assert!(messages.iter().any(|m| m.contains("recording_ready")));
     }
 
+    /// A segment can finish before the squelch-close tick inserts the row (a
+    /// device loss mid-transmission). The file must be held, not deleted: the
+    /// close handler is the next thing to run.
     #[test]
-    fn a_file_with_no_hit_row_is_deleted_rather_than_orphaned() {
+    fn a_file_with_no_hit_row_yet_is_held_for_the_close_handshake() {
         let db = unique_test_db_path("recordings-orphan.db");
         init_analytics_db(&db).expect("migrate");
         let root = temp_root();
-        let orphan = root.join("no-row.wav");
-        std::fs::write(&orphan, b"RIFF").unwrap();
+        let held = root.join("no-row.wav");
+        std::fs::write(&held, b"RIFF").unwrap();
         let (ws, _) = broadcast::channel(16);
         let sink = sink(&db, &root, &ws);
 
-        sink.persist(SegmentOutcome::Finalized {
+        let outcome = SegmentOutcome::Finalized {
             hit_uid: "no-row".to_string(),
             file_name: "no-row.wav".to_string(),
             duration_secs: 1.0,
             bytes: 32_000,
-            status: SegmentStatus::Ready,
-            confidence: LinkConfidence::Exact,
-            error: None,
-        });
+            status: SegmentStatus::Partial,
+            confidence: LinkConfidence::Uncertain,
+            error: Some("audio_device_lost".to_string()),
+        };
+        sink.persist(outcome.clone());
+        assert!(
+            held.exists(),
+            "the bytes must survive until the row is decided"
+        );
 
-        assert!(!orphan.exists());
+        // The hit turned out to be below the activity minimum, so no row will
+        // exist and the audio has nothing to belong to.
+        sink.resolve_deferred(outcome, false);
+        assert!(!held.exists());
+    }
+
+    /// The same segment with a persisted row lands on that row instead of being
+    /// deleted — the bug this handshake exists to prevent.
+    #[test]
+    fn a_deferred_segment_is_applied_when_the_row_arrives() {
+        let db = unique_test_db_path("recordings-deferred.db");
+        init_analytics_db(&db).expect("migrate");
+        let root = temp_root();
+        let (ws, _) = broadcast::channel(16);
+        let service = service(&db, &root);
+        let transcription = TranscriptionService::new(
+            Arc::new(db.clone()),
+            ws.clone(),
+            crate::transcription::TranscriptionSettings {
+                enabled: false,
+                binary: String::new(),
+                model: String::new(),
+                language: "en".to_string(),
+                vocabulary: String::new(),
+                threads: 1,
+                timeout: Duration::from_secs(1),
+                models_dir: std::env::temp_dir(),
+            },
+            Arc::new(Mutex::new(root.clone())),
+        );
+        let sink = RecordingSink {
+            db_path: Arc::new(db.clone()),
+            ws_tx: ws.clone(),
+            transcription,
+            root: Arc::new(Mutex::new(root.clone())),
+            pending: service.pending.clone(),
+        };
+        std::fs::write(root.join("h-late.wav"), b"RIFF").unwrap();
+        sink.persist(SegmentOutcome::Finalized {
+            hit_uid: "h-late".to_string(),
+            file_name: "h-late.wav".to_string(),
+            duration_secs: 2.0,
+            bytes: 64_000,
+            status: SegmentStatus::Partial,
+            confidence: LinkConfidence::Uncertain,
+            error: Some("audio_device_lost".to_string()),
+        });
+        assert_eq!(service.initial_status("h-late"), "partial");
+        assert!(service
+            .pending
+            .lock()
+            .unwrap()
+            .pending
+            .contains_key("h-late"));
+
+        seeded_hit(&db, "h-late", "recording", None);
+        service.hit_closed("h-late", true);
+
+        let mut hit = hit_store::get_hit(&db, "h-late").unwrap();
+        for _ in 0..200 {
+            if hit.recording_status == "partial" {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            hit = hit_store::get_hit(&db, "h-late").unwrap();
+        }
+        assert_eq!(hit.recording_status, "partial");
+        assert_eq!(hit.recording_file.as_deref(), Some("h-late.wav"));
+        assert_eq!(hit.link_confidence.as_deref(), Some("uncertain"));
+        assert!(root.join("h-late.wav").exists());
+        assert!(service.pending.lock().unwrap().pending.is_empty());
     }
 
     #[test]
@@ -914,8 +1234,18 @@ mod tests {
         seeded_hit(&db, "h-lost", "recording", Some("h-lost.wav"));
         seeded_hit(&db, "h-gone", "ready", Some("h-gone.wav"));
         std::fs::write(root.join("h-live.wav"), b"RIFF").unwrap();
-        // A half-written file left by a crash.
+        // A half-written file left by a crash, and one a live post-roll could
+        // still be writing.
         std::fs::write(root.join("crash.wav.part"), b"RIFF").unwrap();
+        std::fs::write(root.join("live.wav.part"), b"RIFF").unwrap();
+        let old = std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.join("crash.wav.part"))
+            .unwrap();
+        old.set_times(
+            std::fs::FileTimes::new().set_modified(SystemTime::now() - Duration::from_secs(3600)),
+        )
+        .unwrap();
 
         let service = service(&db, &root);
         let report = service.reconcile();
@@ -923,6 +1253,10 @@ mod tests {
         assert_eq!(report.interrupted_rows, 2);
         assert_eq!(report.missing_rows, 1);
         assert_eq!(report.partial_files_removed, 1);
+        assert!(
+            root.join("live.wav.part").exists(),
+            "a recently written part file may belong to an in-flight hit"
+        );
         let live = hit_store::get_hit(&db, "h-live").unwrap();
         assert_eq!(live.recording_status, "partial");
         assert_eq!(live.link_confidence.as_deref(), Some("uncertain"));

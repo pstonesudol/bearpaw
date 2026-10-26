@@ -1017,7 +1017,10 @@ is made, so a correction is never destructive. Blank text is allowed.
 
 Queues a local transcription. `force: true` retranscribes a hit that already has
 text. Returns `202 {"hit_uid", "transcript_status": "pending"}`.
-`409 recording_not_available` when the hit has no playable audio.
+`409 recording_not_available` when the hit has no playable audio or predates
+recordings, and `409 transcription_disabled` when transcription is switched off.
+A retranscription refreshes `transcript_original` (the machine text) but keeps
+the user's correction as `transcript`.
 
 #### DELETE /hits/{id}/recording
 

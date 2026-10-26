@@ -455,6 +455,9 @@ pub struct TranscriptionService {
     root: Arc<Mutex<PathBuf>>,
     worker: Mutex<Option<JoinHandle<()>>>,
     started: AtomicBool,
+    /// Held across `start`/`stop` so the sender and the worker handle cannot be
+    /// observed half-published.
+    start_lock: Mutex<()>,
 }
 
 impl TranscriptionService {
@@ -472,6 +475,7 @@ impl TranscriptionService {
             root,
             worker: Mutex::new(None),
             started: AtomicBool::new(false),
+            start_lock: Mutex::new(()),
         })
     }
 
@@ -492,18 +496,22 @@ impl TranscriptionService {
         if let Ok(mut slot) = self.settings.lock() {
             *slot = settings.clone();
         }
+        // Re-enabling after a disabled period needs a worker and a requeue.
+        // `start` performs the requeue itself, so doing it here as well would
+        // enqueue the backlog twice.
         if settings.enabled && !was_enabled {
             self.start();
-            for uid in hit_store::pending_transcription_uids(&self.db_path) {
-                self.enqueue(&uid);
-            }
         }
     }
 
-    /// Start the worker once. A second call is a no-op, including from a
-    /// handler and a startup sweep racing each other.
+    /// Start the worker once.
+    ///
+    /// Serialised: a caller that loses the race must wait until the winner has
+    /// published the sender, or its job is silently dropped. `started` is set
+    /// last, after the sender exists.
     pub fn start(&self) {
-        if self.started.swap(true, Ordering::SeqCst) {
+        let _start = self.start_lock.lock();
+        if self.started.load(Ordering::SeqCst) {
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
@@ -519,16 +527,32 @@ impl TranscriptionService {
             *worker = handle;
         }
         if let Ok(mut slot) = self.sender.lock() {
-            *slot = Some(tx);
+            *slot = Some(tx.clone());
         }
-        // Any job interrupted by the last shutdown is queued again. This is the
-        // only place the queue is rebuilt from disk.
-        for uid in hit_store::pending_transcription_uids(&self.db_path) {
-            self.enqueue(&uid);
+        self.started.store(true, Ordering::SeqCst);
+        // Any job interrupted by the last shutdown is queued again. Send on the
+        // local sender rather than calling `enqueue`: that would re-enter
+        // `start` and deadlock on `start_lock`.
+        if self.settings().enabled {
+            for uid in hit_store::pending_transcription_uids(&self.db_path) {
+                let _ = tx.send(Job::Transcribe {
+                    hit_uid: uid,
+                    force: false,
+                });
+            }
         }
     }
 
+    /// Ask the worker to stop.
+    ///
+    /// Deliberately does NOT join. A `whisper-cli` job can run for minutes
+    /// (the timeout is 300 s by default), and joining would make quitting the
+    /// app hang until the model finished. The worker sees `Stop` after the
+    /// current job; if the process exits first, the row is still `processing`
+    /// and the next launch requeues it. The handle is dropped (detached), so
+    /// nothing waits on it.
     pub fn stop(&self) {
+        let _start = self.start_lock.lock();
         if !self.started.swap(false, Ordering::SeqCst) {
             return;
         }
@@ -538,9 +562,7 @@ impl TranscriptionService {
             }
         }
         if let Ok(mut worker) = self.worker.lock() {
-            if let Some(handle) = worker.take() {
-                let _ = handle.join();
-            }
+            let _ = worker.take();
         }
     }
 

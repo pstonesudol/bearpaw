@@ -104,14 +104,24 @@ export function HitDetailSheet({ hitUid, initial, onClose }: HitDetailSheetProps
     }
   }, [hitUid]);
 
-  useEffect(() => {
-    if (!hitUid) return;
-    // Opening a different hit is a dialog lifecycle event, not derived state.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+  // Opening a different hit must not leave the previous hit's audio, status or
+  // draft on screen under the new id. The sheet stays mounted while open, so
+  // this is a real transition rather than a remount.
+  const resetForHit = useCallback(() => {
+    setHit(null);
+    setError(null);
+    setDraft('');
     setEditing(false);
     setConfirmDelete(false);
+  }, []);
+
+  useEffect(() => {
+    if (!hitUid) return;
+    // Dialog lifecycle, not derived render state.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    resetForHit();
     void load();
-  }, [hitUid, load]);
+  }, [hitUid, resetForHit, load]);
 
   // Transcription happens on a backend thread; poll only while there is
   // something to wait for. A finished job also arrives over the WebSocket, but
@@ -384,7 +394,7 @@ export function HitDetailSheet({ hitUid, initial, onClose }: HitDetailSheetProps
               )}
 
               <div className="flex flex-wrap items-center gap-2 pt-1">
-                {!editing && (
+                {!editing && hit.hit_uid && (
                   <button
                     type="button"
                     onClick={() => {

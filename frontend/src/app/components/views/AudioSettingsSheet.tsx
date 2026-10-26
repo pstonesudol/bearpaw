@@ -115,6 +115,7 @@ export function AudioSettingsSheet({ isOpen, onClose }: AudioSettingsSheetProps)
   const [binaryDraft, setBinaryDraft] = useState<string | null>(null);
   const [vocabularyDraft, setVocabularyDraft] = useState<string | null>(null);
   const mounted = useRef(true);
+  const statusPollBusy = useRef(false);
 
   const save = useCallback(
     async <K extends keyof Preferences>(key: K, backendKey: string, value: Preferences[K]) => {
@@ -173,12 +174,18 @@ export function AudioSettingsSheet({ isOpen, onClose }: AudioSettingsSheetProps)
   useEffect(() => {
     if (!isOpen || !preferences.audioRecordingEnabled) return;
     const timer = window.setInterval(async () => {
+      // One request at a time: a slow status read must not queue up behind
+      // itself for the whole time the sheet is open.
+      if (statusPollBusy.current) return;
+      statusPollBusy.current = true;
       try {
         const next = await getAudioStatus();
         if (mounted.current) setStatus(next);
       } catch {
         // A background poll that fails must not toast; the sheet already shows
         // the last known state.
+      } finally {
+        statusPollBusy.current = false;
       }
     }, 500);
     return () => window.clearInterval(timer);
