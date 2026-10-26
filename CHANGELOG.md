@@ -8,6 +8,14 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Hear the hits you missed.** Bearpaw can record the audio of every scanner
+  transmission from a USB line-in adapter (such as the Cubilux USB-C capture
+  adapter), keep a configurable pre-roll and post-roll, and transcribe each
+  recording offline with `whisper-cli`. Recent Hits gains a recording marker
+  and a transcript preview, a hit's detail view plays the audio and lets you
+  correct its transcript without losing the machine version, and History
+  searches tag, frequency and transcript text. Recording is off until you turn
+  it on in Device → Audio & Transcription; audio never leaves your Mac.
 - **A paw that lights up as your radio syncs.** Amber outlines illuminate at
   each 20% milestone, then fill on success. Cancelled syncs fade to gray;
   failed syncs show a red circle-and-slash and remain visible until closed.

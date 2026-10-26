@@ -265,6 +265,11 @@ VITE_WS_URL=                # auto-detect from window.location if empty
 - [`crates/bearpaw-api/src/api/program_mode.rs`](crates/bearpaw-api/src/api/program_mode.rs) — PRG/EPG RAII guard
 - [`crates/bearpaw-api/src/api/memory_sync.rs`](crates/bearpaw-api/src/api/memory_sync.rs) — `CIN,1..500` walker
 - [`crates/bearpaw-api/src/api/channel_cache.rs`](crates/bearpaw-api/src/api/channel_cache.rs) — channel-memory persistence: snapshot flush, guarded load
+- [`crates/bearpaw-api/src/audio/`](crates/bearpaw-api/src/audio/) — `cpal` capture (`capture.rs`) and the pre-roll/post-roll segmenter (`segment.rs`)
+- [`crates/bearpaw-api/src/recordings.rs`](crates/bearpaw-api/src/recordings.rs) — recording service, file retention, startup reconciliation
+- [`crates/bearpaw-api/src/transcription.rs`](crates/bearpaw-api/src/transcription.rs) — offline `whisper-cli` job queue
+- [`crates/bearpaw-api/src/api/hit_store.rs`](crates/bearpaw-api/src/api/hit_store.rs) — media columns, searchable history, transcript queries
+- [`crates/bearpaw-api/src/api/handlers/recordings.rs`](crates/bearpaw-api/src/api/handlers/recordings.rs) — `/hits`, `/audio`, WAV serving with Range
 - [`crates/bearpaw-api/src/api/ws.rs`](crates/bearpaw-api/src/api/ws.rs) — WebSocket broadcast
 - [`crates/bearpaw-api/src/api/security.rs`](crates/bearpaw-api/src/api/security.rs) — CORS + Host-header hardening. The API is an unauthenticated loopback server, so any web page the user visits is the threat; this closes the cross-origin-fetch and DNS-rebinding paths.
 - [`crates/bearpaw-api/src/api/handlers/`](crates/bearpaw-api/src/api/handlers/) — REST handlers (analytics, banks, commands, exports, import_ss, lockouts, memory, preferences, settings, status)
@@ -279,6 +284,8 @@ VITE_WS_URL=                # auto-detect from window.location if empty
 ### Frontend
 - [`frontend/src/app/App.tsx`](frontend/src/app/App.tsx) — app shell, view routing, top-level state derivation
 - [`frontend/src/app/components/views/ScanView.tsx`](frontend/src/app/components/views/ScanView.tsx), [`DeviceTab.tsx`](frontend/src/app/components/views/DeviceTab.tsx), [`ChannelsTab.tsx`](frontend/src/app/components/views/ChannelsTab.tsx), [`useChannelGrid.ts`](frontend/src/app/components/views/useChannelGrid.ts), [`channelGridEdits.ts`](frontend/src/app/components/views/channelGridEdits.ts), [`channelValidation.ts`](frontend/src/app/components/views/channelValidation.ts), [`ActivityExportSheet.tsx`](frontend/src/app/components/views/ActivityExportSheet.tsx)
+- [`frontend/src/app/components/views/HitDetailSheet.tsx`](frontend/src/app/components/views/HitDetailSheet.tsx), [`HitHistorySheet.tsx`](frontend/src/app/components/views/HitHistorySheet.tsx), [`AudioSettingsSheet.tsx`](frontend/src/app/components/views/AudioSettingsSheet.tsx) — playback, transcript correction, searchable history, audio settings
+- [`frontend/src/api/recordings.ts`](frontend/src/api/recordings.ts) — media/history REST client (separate from the scanner command client)
 - [`frontend/src/store/useStore.ts`](frontend/src/store/useStore.ts) — Zustand store
 - [`frontend/src/api/client.ts`](frontend/src/api/client.ts) — REST client
 - [`frontend/src/websocket/ScannerWebSocket.ts`](frontend/src/websocket/ScannerWebSocket.ts) — WS client with auto-reconnect
@@ -426,6 +433,7 @@ When you touch code near one of these guards, **read the comment**, run the name
 | A migration step is atomic and never bumps the version on failure | [`crates/bearpaw-api/src/api/mod.rs`](crates/bearpaw-api/src/api/mod.rs) `run_migration_step` | `a_failed_step_leaves_the_version_unchanged`, `a_partly_failing_step_rolls_back_entirely`, `a_failed_backup_aborts_the_migration` | Every migration statement was `let _ = conn.execute(...)` followed by an unconditional `set_schema_version`, so a failed step still marked the database migrated: the next launch read the new version, skipped the migration, and queried a schema that did not exist — invisible until a query hit a missing column. The version bump now lives INSIDE the step's transaction, so it cannot outlive a failure. Migrations are forward-only, which makes the pre-migration `.bak` the only recovery path — so a failed backup aborts rather than proceeding, and **nothing in Bearpaw deletes a `.bak`**. A database whose `user_version` is NEWER than this build is refused outright; running old code against a newer schema is silent misbehaviour. See `docs/DATA_LIFECYCLE.md`. |
 | Each test gets its own databases | [`crates/bearpaw-api/src/api/mod.rs`](crates/bearpaw-api/src/api/mod.rs) `fallback_db_path` (cfg-split) | `each_state_gets_its_own_databases` | `resolve_db_path` falls back to a fixed path when its env var is unset, and no test sets one — so all 29 `default_state()` calls opened the SAME two SQLite files and contended under parallel execution. `preferences_reset_alias_matches` deletes every preference row, which a concurrent test could observe mid-assertion. The suite passed with `--test-threads=1` and failed intermittently without it, and adding unrelated tests made it MORE likely to fire. That failure shape is the dangerous one: it trains people to rerun, and CLAUDE.md's "Never push to retry CI" depends on failures being real. |
 | The channel cache records when the RADIO was read | [`channel_cache.rs`](crates/bearpaw-api/src/api/channel_cache.rs) `flush_channel_cache` | `a_flush_records_the_sync_time_not_the_flush_time`, `a_flush_with_no_recorded_sync_stamps_now` | `flush_channel_cache` stamped `epoch_now()`. That was correct while the only caller was a completed sync — there, "now" and "when the radio was read" are the same instant — and #537 added a caller on a 30-second timer, which quietly broke the equivalence: a cache read three days ago relabelled itself as fresh twice a minute, and it overwrote the timestamp a cache load restores within one interval of launch. `synced_at` exists to answer "how stale is this?" (#413 wants "last synced 3 days ago" on screen), and an indicator that always reads "moments ago" is worse than none because it looks like it works. The stamp is `shadow.last_sync`, falling back to `epoch_now()` only when no sync is recorded. **Every test in #537 passed while this was broken** — they asserted `last_synced_at(...).is_some()`, and a guard that checks a value exists cannot notice the value is wrong. The two guards are paired: the first alone passes for a build stamping a hardcoded 0.0. |
+| A recording is joined to the hit it was captured for | [`api/mod.rs`](crates/bearpaw-api/src/api/mod.rs) `track_analytics_transition` (uid at open, insert before `hit_close`) + the `uid` in [`poll.rs`](crates/bearpaw-api/src/api/poll.rs) `scan_hit` | `a_hit_allocates_a_durable_uid_at_open`, `two_hits_never_share_a_uid`, `a_finalized_segment_is_written_to_the_hit_and_announced`, `a_file_with_no_hit_row_is_deleted_rather_than_orphaned` | The uid must exist at squelch-OPEN (the recorder names the file before the row is written) and the row must exist at hit-CLOSE before the segmenter's `UPDATE` runs. Allocating the id at close, or queueing `hit_close` before the insert, produces audio files with no row: the segmenter deletes them as orphans, so the symptom is "recording is on and nothing is ever saved" rather than an error. |
 | A scanner plugged in after a scanner-less launch is found | `spawn_poll_loop` in [`poll.rs`](crates/bearpaw-api/src/api/poll.rs) (the `None`-target resolve loop) + `run_server_with_shutdown` in [`api/mod.rs`](crates/bearpaw-api/src/api/mod.rs), which spawns the loop whenever it has a resolver | `a_scanner_plugged_in_after_launch_is_found`, `autodetect_does_not_rerun_continuously_while_nothing_is_attached` | Both entry points built a `ScannerLink` only when autodetect found something at launch, and with none `run_server_with_shutdown` started NO poll loop, so the #416 re-resolve (which lives inside the loop) never ran: plug in after launch, and nothing until a relaunch (#782). The loop now starts with no target and resolves every `RERESOLVE_AFTER`. **`command_tx` is published only once a scanner is found** -- handlers read its absence as `503 device_disconnected` and fail at once; publishing it early turns every request before the scanner arrives into a queue-then-3 s-timeout. The two guards are paired and mutation-tested: exiting the thread on `None` fails both, publishing `command_tx` eagerly fails only the first, dropping the throttle fails only the second (1592 resolves in 2 s against a ceiling of 7). |
 | A cached channel map is only adopted from the SAME scanner | [`channel_cache.rs`](crates/bearpaw-api/src/api/channel_cache.rs) `load_channel_cache` + the call site in [`poll.rs`](crates/bearpaw-api/src/api/poll.rs) `update_device_info_from_mdl` | `a_matching_cache_is_loaded_on_connect`, `a_cache_from_a_larger_scanner_is_discarded`, `a_cache_from_a_smaller_scanner_is_discarded`, `a_reconnect_does_not_overwrite_live_channels`, `a_loaded_cache_restores_the_sync_time` | Three separate traps. **(a)** The capacity comparison is `!=`, not `>`. Rejecting only the too-big direction still lets a BC75XLT's 300 rows load onto a 500-channel BC125AT, and because the frontend suppresses its startup sync whenever channels exist, the wrong radio's memory renders and never refreshes. Nothing panics either way — `index_to_bank` returns 0 above `channel_count` while the frontend's `deriveBankFromIndex` clamps to `bankCount`, so phantoms render in a bank the backend calls 0, and `export_csv` writes them to the user's file. **(b)** The load must run at the MDL chokepoint: before `MDL` is parsed `AppState::capabilities()` answers with the BC125AT default of 500, so an earlier load waves a 500-row cache onto a BC75XLT. Use the local `caps` — `state.capabilities()` takes `device.read()` and the function held `device.write()`. **(c)** It must NOT be gated on `transitioned_to_connected`, which is always false in production (#539) and true in tests: green CI, dead on hardware. Gate on an empty shadow instead — which is also what stops a reconnect (every few seconds on a flapping USB link, and nothing clears `shadow.channels` on disconnect) from stomping live edits with stale rows. The positive guard is not optional: with the load call removed, both discard guards stay green. |
 | Only a complete channel map is written to the cache | [`channel_cache.rs`](crates/bearpaw-api/src/api/channel_cache.rs) `is_complete_image`, applied in `flush_channel_cache` and `load_channel_cache`, plus the per-row error check in `save_channels` | `a_partial_shadow_does_not_overwrite_a_complete_cache`, `a_holed_walk_does_not_delete_the_good_cache`, `a_walk_missing_a_middle_channel_does_not_replace_the_cache`, `a_map_whose_indices_are_shifted_is_refused`, `a_save_whose_insert_fails_does_not_commit` | The write side had NO completeness guard at all — only "the map is not empty" — while the read side inferred it from `max(index)`. Same question, two different wrong answers (#567, #569). `save_channels` DELETEs before inserting, so any non-empty shadow replaced the whole cache: a `GET /memory/channels/:index` landing before the MDL probe leaves ONE row in the shadow, and the 30-second timer then wrote it over 500 good ones. The walk also skips a channel it could not read (a `Soft` error or an unparseable reply — expected over 300–500 commands on a CP210x, pitfall #11), and a skip at the TOP index destroyed the good cache and wrote rows that `load_channel_cache` then rejected on every launch **forever**. Both halves of `is_complete_image` are separately pinned and neither is redundant: delete `len` and only the middle-hole guard goes red, delete `max(index)` and only the shifted-index guard does. The shifted-index guard must assert cache CONTENT, not row count — a shifted map writes exactly `channel_count` rows too, so counting them passes either way (found by mutation, not review). **#569 is fixed by prevention, not tolerance:** a cache with a hole is still discarded at load, because telling "299 rows from a BC75XLT" from "299-of-500 from a BC125AT" needs the writer's capacity STORED, which needs a migration — and #574 says the pre-migration backup is incomplete, so that migration must not land first. |
@@ -484,6 +492,56 @@ redundant write costs a couple of milliseconds.
    the connected scanner by `channels_with_banks`. A persisted bank would let a
    cache written under one model be read under another and reproduce the
    bank-derivation third rail by a new route.
+
+## Audio recordings and transcripts
+
+Full setup, hardware notes and the manual test plan: [`docs/AUDIO_RECORDING.md`](docs/AUDIO_RECORDING.md).
+
+The BC125AT has **one receiver**, so there is exactly one audio stream and at
+most one open segment. Every rule follows from that:
+
+1. **The hit uid is allocated at squelch-open, not at close.**
+   `new_hit_uid` runs in `track_analytics_transition`'s open branch, because the
+   recorder needs a file name before the hit row exists. The uid is broadcast on
+   `scan_hit`, persisted on the row, and used as the file stem. Joining audio to
+   a hit by timestamp later is guesswork and must not be reintroduced.
+2. **The row is inserted BEFORE `hit_close` is queued.** The segmenter's
+   `UPDATE ... WHERE hit_uid` must find the row; its retry window is 5 × 20 ms
+   by design. Reversing that order makes every recording look orphaned and
+   deletes the files.
+3. **Nothing audio-related runs on the poll thread.** `hit_open`/`hit_close`
+   push one event into a channel. Capture, WAV writing, SQLite updates and
+   transcription each have their own thread. A stalled disk or vanished device
+   delays a recording and nothing else.
+4. **Timing is measured in samples, not wall time.** Post-roll is "N more
+   samples", so a blocked writer cannot stretch a segment and a file's duration
+   is exactly its length ÷ sample rate.
+5. **A squelch open while a segment is still open is `partial` + `uncertain`.**
+   That is the frequency-changed-mid-squelch case a one-receiver scanner cannot
+   express. Keep the audio, say the association is uncertain; never assign it
+   silently to one frequency.
+6. **Files are written `<uid>.wav.part` and renamed after `finalize`.** A crash
+   leaves `.part`, swept at startup. Startup also turns a row still marked
+   `recording` into `partial` (file exists) or `failed` (no file), and a `ready`
+   row whose file is gone into `missing`.
+7. **The database stores a relative file name, never an absolute path.** The
+   recordings root is a preference. `hit_store::safe_join` refuses absolute
+   paths and `..`; do not bypass it — the database is not a trust boundary.
+8. **Transcription is an external process** (`whisper-cli` + a GGML model).
+   A missing engine or model is a named job failure, never a startup or build
+   failure, and recording works without it. Jobs are one-at-a-time and
+   interrupted `processing` rows are requeued on the next launch.
+9. **Do not treat transcripts as authoritative.** The user's correction is
+   stored in `transcript`, the machine text in `transcript_original`. Never
+   overwrite the original, and never present a transcript as confirmation of
+   what was said.
+
+Platform notes: capture uses `cpal`, so it compiles on macOS, Linux (needs
+`libasound2-dev`) and Windows, but only macOS is designed for and documented.
+The macOS bundle declares `NSMicrophoneUsageDescription` in
+[`frontend/src-tauri/Info.plist`](frontend/src-tauri/Info.plist); a denied
+permission can deliver silence rather than an error. The CSP allows
+`media-src http://localhost:8000` for the `<audio>` element.
 
 ## Memory sync performance
 
