@@ -1069,6 +1069,26 @@ setup as Bearpaw resolves it:
 Just the `status` object above. Poll it while a settings sheet is open for the
 input level; it does not start or stop capture.
 
+#### GET /recordings/summary
+
+Library totals for the history header. Counts rows that still reference audio,
+so it sizes what the list can play rather than every file in the folder.
+
+```json
+{
+  "count": 48,
+  "bytes": 9526154,
+  "oldest_timestamp": 1760000000.1,
+  "failed_transcripts": 41,
+  "retention_days": 30
+}
+```
+
+`oldest_timestamp` is `null` for an empty library. `retention_days: 0` means
+"keep until the hit itself ages out of analytics retention". This is separate
+from `/audio/status` on purpose: that one is polled for the input level, and this
+runs a database aggregate.
+
 #### POST /audio/test
 
 ```json

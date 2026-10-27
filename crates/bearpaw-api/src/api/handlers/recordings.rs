@@ -56,6 +56,22 @@ pub(crate) async fn get_audio_status(State(state): State<AppState>) -> Json<Valu
     Json(json!(state.recordings.status()))
 }
 
+/// Size and age of the recording library, plus how much of it still needs a
+/// transcript.
+///
+/// Kept out of `/audio/status` on purpose: the settings sheet polls that one for
+/// the level meter, and this runs a query.
+pub(crate) async fn get_recordings_summary(State(state): State<AppState>) -> Json<Value> {
+    let library = hit_store::recording_library(&state.analytics_db_path);
+    Json(json!({
+        "count": library.count,
+        "bytes": library.bytes,
+        "oldest_timestamp": library.oldest_timestamp,
+        "failed_transcripts": library.failed_transcripts,
+        "retention_days": state.recordings.settings().retention_days,
+    }))
+}
+
 pub(crate) async fn post_audio_test(
     State(state): State<AppState>,
     Json(body): Json<TestClipRequest>,
@@ -418,6 +434,47 @@ mod api_tests {
         let (status, _, body) = call(&state, Method::GET, "/api/v1/hits/nope", None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(json(&body)["error"], "hit_not_found");
+    }
+
+    #[tokio::test]
+    async fn recordings_summary_sizes_the_library_and_counts_failed_transcripts() {
+        let (state, _root) = seeded();
+        insert_analytics_hit(
+            &state.analytics_db_path,
+            &ActivityHit {
+                id: "2".to_string(),
+                timestamp: 1_700_003_600.0,
+                frequency: 160.59,
+                channel: Some(56),
+                alpha_tag: Some("SEPTA NORTH".to_string()),
+                rssi: 30,
+                duration: 4.0,
+                modulation: "NFM".to_string(),
+                mode: ScannerMode::Scan,
+                bank: Some(2),
+                session_id: "s".to_string(),
+                ended_at: 1_700_003_604.0,
+                scanner_id: Some("BC125AT".to_string()),
+                hit_uid: Some("h-failed".to_string()),
+                recording_status: "ready".to_string(),
+                recording_file: Some("h-failed.wav".to_string()),
+                recording_duration: Some(4.0),
+                recording_bytes: Some(2_048),
+                link_confidence: Some("exact".to_string()),
+                transcript_status: "failed".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let (status, _, body) =
+            call(&state, Method::GET, "/api/v1/recordings/summary", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let body = json(&body);
+        assert_eq!(body["count"], 2);
+        assert_eq!(body["bytes"], 2_056);
+        assert_eq!(body["oldest_timestamp"], 1_700_000_000.0);
+        assert_eq!(body["failed_transcripts"], 1);
+        assert!(body["retention_days"].as_u64().unwrap() > 0);
     }
 
     #[tokio::test]

@@ -491,6 +491,45 @@ pub(crate) fn recording_rows(db_path: &str) -> Vec<(String, String, String, f64)
     out
 }
 
+/// Aggregate of the recordings still on disk, for the history header.
+///
+/// Counts rows that still reference audio — a retention sweep or a manual delete
+/// clears `recording_path` — so this sizes what the list can actually play, not
+/// every file that happens to sit in the folder.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RecordingLibrary {
+    pub count: usize,
+    pub bytes: i64,
+    pub oldest_timestamp: Option<f64>,
+    pub failed_transcripts: usize,
+}
+
+pub(crate) fn recording_library(db_path: &str) -> RecordingLibrary {
+    let Some(conn) = open_sqlite(db_path) else {
+        return RecordingLibrary::default();
+    };
+    conn.query_row(
+        "SELECT COUNT(*), \
+                COALESCE(SUM(COALESCE(recording_bytes, 0)), 0), \
+                MIN(timestamp), \
+                COALESCE(SUM(CASE WHEN COALESCE(transcript_status, 'none') = 'failed' \
+                                  THEN 1 ELSE 0 END), 0) \
+         FROM scan_hits \
+         WHERE recording_path IS NOT NULL \
+           AND COALESCE(recording_status, 'none') IN ('ready', 'partial')",
+        [],
+        |row| {
+            Ok(RecordingLibrary {
+                count: row.get::<_, i64>(0)? as usize,
+                bytes: row.get::<_, i64>(1)?,
+                oldest_timestamp: row.get::<_, Option<f64>>(2)?,
+                failed_transcripts: row.get::<_, i64>(3)? as usize,
+            })
+        },
+    )
+    .unwrap_or_default()
+}
+
 /// Delete audio older than `retention_days` while keeping every hit row.
 /// Returns `(files_deleted, rows_marked)`. A retention of `0` means "keep until
 /// the hit itself ages out", not "delete now" — a zero that wipes the library

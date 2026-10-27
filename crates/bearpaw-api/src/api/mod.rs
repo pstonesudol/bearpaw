@@ -373,6 +373,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/status", get(handlers::status::get_status))
         .route(
+            "/api/v1/recordings/summary",
+            get(handlers::recordings::get_recordings_summary),
+        )
+        .route(
             "/api/v1/device/info",
             get(handlers::status::get_device_info),
         )
