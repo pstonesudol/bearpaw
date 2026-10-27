@@ -466,8 +466,7 @@ mod api_tests {
             },
         );
 
-        let (status, _, body) =
-            call(&state, Method::GET, "/api/v1/recordings/summary", None).await;
+        let (status, _, body) = call(&state, Method::GET, "/api/v1/recordings/summary", None).await;
         assert_eq!(status, StatusCode::OK);
         let body = json(&body);
         assert_eq!(body["count"], 2);
