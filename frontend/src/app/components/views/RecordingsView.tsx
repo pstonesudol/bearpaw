@@ -23,7 +23,9 @@ import {
   transcribeHit,
   type HitQuery,
 } from '../../../api/recordings';
+import { useStore } from '../../../store/useStore';
 import type { HitDetail, HitWaveform, RecordingsSummary, TranscriptStatus } from '../../../types';
+import { AudioSettingsSheet } from './AudioSettingsSheet';
 import { HitDetailSheet, formatDuration } from './HitDetailSheet';
 
 export interface RecordingsViewProps {
@@ -228,6 +230,10 @@ export function RecordingsView({ onOpenHit }: RecordingsViewProps) {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [retryingFailed, setRetryingFailed] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
+  const [audioSheetOpen, setAudioSheetOpen] = useState(false);
+  // Whether the user has switched hit recording on. Read from the store so the
+  // empty state can tell "off" apart from "on, but nothing has been caught yet".
+  const recordingEnabled = useStore((state) => state.preferences.audioRecordingEnabled);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -547,6 +553,9 @@ export function RecordingsView({ onOpenHit }: RecordingsViewProps) {
 
     const hit = hitById(selectedId);
     if (!hit) return;
+    // Every action below needs audio; a hit logged while recording was off has
+    // none, so the shortcut is a no-op rather than a failed request.
+    if (!hasAudio(hit) && ' tTcCdD'.includes(event.key)) return;
     if (event.key === ' ') {
       event.preventDefault();
       togglePlay(hit);
@@ -565,13 +574,20 @@ export function RecordingsView({ onOpenHit }: RecordingsViewProps) {
 
   const groups = useMemo(() => buildGroups(rows, groupBy), [rows, groupBy]);
   const hasMore = rows.length < total;
+  // No audio anywhere: the media-only filters have nothing to narrow, so
+  // offering them would only produce empty lists under a tab called
+  // "Recordings". `null` means the summary has not loaded yet.
+  const noRecordings = summary !== null && summary.count === 0;
+  const hitsWithoutAudio = noRecordings ? (summary?.hits_total ?? 0) : 0;
+  const playableRows = rows.filter(hasAudio).length;
 
-  const quickFilters: Array<{ id: QuickFilter; label: string; count?: number }> = [
+  const allFilters: Array<{ id: QuickFilter; label: string; count?: number }> = [
     { id: 'all', label: 'All', count: summary?.hits_total },
     { id: 'audio', label: 'With audio', count: summary?.count },
     { id: 'untranscribed', label: 'Untranscribed', count: summary?.untranscribed },
     { id: 'failed', label: 'Failed', count: summary?.failed_transcripts },
   ];
+  const quickFilters = noRecordings ? allFilters.slice(0, 1) : allFilters;
 
   return (
     <div className="flex h-full flex-col gap-3">
@@ -639,6 +655,34 @@ export function RecordingsView({ onOpenHit }: RecordingsViewProps) {
           </button>
         ))}
       </div>
+
+      {noRecordings && (
+        <div
+          role="status"
+          className="flex flex-wrap items-start gap-3 rounded border border-amber-400/20 bg-amber-400/[0.06] px-3 py-2.5"
+        >
+          <Mic aria-hidden className="mt-0.5 size-4 shrink-0 text-amber-300/80" />
+          <div className="min-w-0 flex-1 space-y-1">
+            <p className="text-sm font-medium text-white/85">
+              {recordingEnabled ? 'Recording is on — nothing caught yet' : 'Hit recording is off'}
+            </p>
+            <p className="text-xs text-white/55">
+              {recordingEnabled
+                ? 'The next transmission will be saved and transcribed here.'
+                : `Bearpaw can save the audio of every transmission and transcribe it locally. Your ${hitsWithoutAudio} ${
+                    hitsWithoutAudio === 1 ? 'hit has' : 'hits have'
+                  } no audio. The hits themselves are listed below.`}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setAudioSheetOpen(true)}
+            className="shrink-0 rounded border border-amber-300/30 bg-amber-400/10 px-2.5 py-1 text-xs text-amber-100 hover:bg-amber-400/15"
+          >
+            {recordingEnabled ? 'Recording settings' : 'Turn on recording'}
+          </button>
+        </div>
+      )}
 
       <div className="flex flex-wrap items-end gap-2">
         <label className="flex min-w-[14rem] flex-1 items-center gap-2 rounded border border-white/15 bg-black/30 px-2">
@@ -766,7 +810,9 @@ export function RecordingsView({ onOpenHit }: RecordingsViewProps) {
           </div>
         ) : rows.length === 0 ? (
           <div className="py-16 text-center text-sm text-white/50">
-            No recordings match these filters.
+            {noRecordings && (summary?.hits_total ?? 0) === 0
+              ? 'No hits yet. They will appear here as the scanner finds traffic.'
+              : 'No recordings match these filters.'}
           </div>
         ) : (
           <div>
@@ -897,7 +943,7 @@ export function RecordingsView({ onOpenHit }: RecordingsViewProps) {
                             )}
                             <span
                               className={cn('size-2 shrink-0 rounded-full', statusDot[status])}
-                              aria-label={STATUS_LABEL[status]}
+                              aria-label={playable ? STATUS_LABEL[status] : 'No recording'}
                             />
                           </span>
                         </button>
@@ -1053,23 +1099,40 @@ export function RecordingsView({ onOpenHit }: RecordingsViewProps) {
 
       <footer className="flex flex-wrap items-center justify-between gap-2 text-[0.7rem] text-white/40">
         <span aria-live="polite">
-          {total === 0 ? 'No recordings' : `${rows.length} of ${total} loaded`}
+          {total === 0
+            ? noRecordings
+              ? 'No hits yet'
+              : 'No recordings'
+            : `${rows.length} of ${total} loaded`}
         </span>
         <span className="flex flex-wrap items-center gap-1">
-          <kbd className="rounded border border-white/15 px-1">space</kbd> play
-          <span aria-hidden>·</span>
+          {/* Only advertise the actions the rows can actually take. With no
+              audio at all, play/transcribe/correct/delete would do nothing. */}
+          {playableRows > 0 && (
+            <>
+              <kbd className="rounded border border-white/15 px-1">space</kbd> play
+              <span aria-hidden>·</span>
+            </>
+          )}
           <kbd className="rounded border border-white/15 px-1">J</kbd>
           <kbd className="rounded border border-white/15 px-1">K</kbd> move
-          <span aria-hidden>·</span>
-          <kbd className="rounded border border-white/15 px-1">T</kbd> transcribe
-          <span aria-hidden>·</span>
-          <kbd className="rounded border border-white/15 px-1">C</kbd> correct
-          <span aria-hidden>·</span>
-          <kbd className="rounded border border-white/15 px-1">D</kbd> delete
+          {playableRows > 0 && (
+            <>
+              <span aria-hidden>·</span>
+              <kbd className="rounded border border-white/15 px-1">T</kbd> transcribe
+              <span aria-hidden>·</span>
+              <kbd className="rounded border border-white/15 px-1">C</kbd> correct
+              <span aria-hidden>·</span>
+              <kbd className="rounded border border-white/15 px-1">D</kbd> delete
+            </>
+          )}
         </span>
       </footer>
 
       <HitDetailSheet hitUid={detailId} initial={null} onClose={() => setDetailId(null)} />
+      {/* The same sheet the Device tab hosts, opened from the empty state's
+          call to action so enabling recording does not cost a tab switch. */}
+      <AudioSettingsSheet isOpen={audioSheetOpen} onClose={() => setAudioSheetOpen(false)} />
     </div>
   );
 }

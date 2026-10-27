@@ -11,6 +11,7 @@ import {
   transcribeHit,
 } from '../../../../api/recordings';
 import type { HitDetail, RecordingsSummary } from '../../../../types';
+import { useStore } from '../../../../store/useStore';
 
 vi.mock('../../../../api/recordings', () => ({
   getHits: vi.fn(),
@@ -332,5 +333,78 @@ describe('RecordingsView', () => {
     vi.mocked(getHits).mockResolvedValue({ hits: [], total: 0, limit: 50, offset: 0 });
     render(<RecordingsView />);
     expect(await screen.findByText('No recordings match these filters.')).toBeInTheDocument();
+  });
+
+  describe('when the user is not recording', () => {
+    beforeEach(() => {
+      useStore.setState((state) => ({
+        preferences: { ...state.preferences, audioRecordingEnabled: false },
+      }));
+      vi.mocked(getRecordingsSummary).mockResolvedValue(
+        summary({ count: 0, bytes: 0, oldest_timestamp: null, hits_total: 93 }),
+      );
+      vi.mocked(getHits).mockResolvedValue({
+        hits: [
+          hit({
+            recording_status: 'none',
+            recording_duration: null,
+            recording_bytes: null,
+            transcript_status: 'none',
+            transcript: null,
+          }),
+        ],
+        total: 1,
+        limit: 50,
+        offset: 0,
+      });
+    });
+
+    it('explains that recording is off instead of showing a bare empty library', async () => {
+      render(<RecordingsView />);
+
+      expect(await screen.findByText('Hit recording is off')).toBeInTheDocument();
+      expect(
+        screen.getByText(/Your 93 hits have no audio\. The hits themselves are listed below\./),
+      ).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /turn on recording/i })).toBeInTheDocument();
+    });
+
+    it('still lists the hits, marked as having no recording', async () => {
+      render(<RecordingsView />);
+
+      expect(await screen.findByText('NORFOLK SOUTHERN')).toBeInTheDocument();
+      expect(screen.getByLabelText('No recording')).toBeInTheDocument();
+      expect(screen.queryByLabelText('Not transcribed')).not.toBeInTheDocument();
+    });
+
+    it('drops the audio-only filters and the shortcuts that need audio', async () => {
+      render(<RecordingsView />);
+      await screen.findByText('Hit recording is off');
+
+      expect(screen.queryByRole('button', { name: /^With audio/ })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /^Failed/ })).not.toBeInTheDocument();
+      expect(screen.queryByText('transcribe')).not.toBeInTheDocument();
+      expect(screen.queryByText('delete')).not.toBeInTheDocument();
+      // Moving between rows still works.
+      expect(screen.getByText('move')).toBeInTheDocument();
+    });
+
+    it('does not fire a transcription for a hit with no audio', async () => {
+      render(<RecordingsView />);
+      await screen.findByText('NORFOLK SOUTHERN');
+
+      fireEvent.keyDown(screen.getByRole('list', { name: 'Recordings' }), { key: 't' });
+      expect(transcribeHit).not.toHaveBeenCalled();
+    });
+
+    it('switches to the waiting message once recording is enabled', async () => {
+      useStore.setState((state) => ({
+        preferences: { ...state.preferences, audioRecordingEnabled: true },
+      }));
+      render(<RecordingsView />);
+
+      expect(await screen.findByText('Recording is on — nothing caught yet')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /recording settings/i })).toBeInTheDocument();
+    });
   });
 });
