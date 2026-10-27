@@ -196,6 +196,20 @@ export async function pickAndReadFile(extensions: string[]): Promise<PickedFile 
   });
 }
 
+/**
+ * Pick a directory (used for the recordings library).
+ *
+ * Returns the absolute path, or null when cancelled or when running outside
+ * Tauri. The browser has no way to hand the backend a filesystem path, so a
+ * browser session cannot move the library — it keeps the app-data default.
+ */
+export async function pickDirectory(): Promise<string | null> {
+  if (!isTauriRuntime()) return null;
+  const selected = await openFileDialog({ multiple: false, directory: true });
+  if (typeof selected !== 'string') return null;
+  return selected;
+}
+
 export async function subscribeBackendStatus(
   onStatus: (status: BackendStatus) => void,
 ): Promise<() => void> {

@@ -23,7 +23,16 @@ Define how Bearpaw stores, migrates, retains, and cleans up local data so app up
   keyed by `(scanner_id, bank)`. Unlike channel memory these are NOT
   disposable: the radio cannot store a bank name, so this table is the only
   copy.
-- Analytics DB: `analytics.db` (scan hit history and aggregates)
+- Analytics DB: `analytics.db` (scan hit history and aggregates). Schema
+  version 3 adds the media columns: `hit_uid`, the recording reference and
+  status, `link_confidence`, and the transcript fields. The audio itself is
+  **not** in SQLite.
+- Recordings: `<data dir>/recordings/<hit-uid>.wav` by default (16 kHz mono
+  16-bit PCM), overridable with the `audio_storage_dir` preference. The
+  database stores a file **name**, never an absolute path, so the library can
+  move. `_tests/` holds short clips from the settings sheet's Test recording
+  button. Whisper models live in `<data dir>/models/`.
+  See [`AUDIO_RECORDING.md`](AUDIO_RECORDING.md).
 
 Cached channel memory is **disposable**. It is a read accelerator; the scanner
 is the source of truth, and losing the cache costs a memory sync, never data.
@@ -67,7 +76,18 @@ to convention:
   two machines sharing a data directory, or restoring from a backup taken before
   an upgrade.
 - **Failures surface as a `migration_failed` diagnostic** rather than a crash or
-  a silent degrade. Bearpaw is offline-first and starts with no network, so a
+  a silent degrade.
+- **Recording files are written atomically.** The WAV is created as
+  `<uid>.wav.part` and renamed only after its trailer is finalized. A crash
+  leaves a `.part`, which startup reconciliation deletes. A row still marked
+  `recording` is reconciled at startup: the file becomes `partial` if it exists,
+  otherwise the row becomes `failed` with `recording_interrupted`.
+- **A finished segment with no hit row yet is held, not deleted.** A device
+  loss can finish a segment before the squelch-close tick writes the row. The
+  recorder keeps the outcome until the close handler reports whether a row was
+  written: if it was, the result is applied; if the hit was below the activity
+  minimum, the file is deleted. Nothing is deleted on the assumption that a row
+  will never arrive. Bearpaw is offline-first and starts with no network, so a
   failure must be visible without being a blocking dialog.
 
 ## Persistence Guarantees
@@ -84,6 +104,12 @@ to convention:
 1. Once at backend startup
 2. Daily while backend is running
 - Manual cleanup endpoint remains available.
+- Recordings: retained by `audio_retention_days` (default 30). `0` means "keep
+  the audio until the hit itself ages out of analytics retention" — it does not
+  delete immediately. Expiry deletes the file and marks the row `deleted`; the
+  hit, its analytics and any transcript remain. Deleting every hit row leaves
+  files behind that the daily orphan sweep removes once they are a day old, so
+  a crashed write is never mistaken for an orphan.
 - **Forgetting a scanner** (`DELETE /api/v1/scanners/{id}`, #417) is the only
   explicit per-scanner delete. In one `scanner.db` transaction it removes the
   profile's `channel_memory`, `bank_names` and `scanners` rows. It then deletes

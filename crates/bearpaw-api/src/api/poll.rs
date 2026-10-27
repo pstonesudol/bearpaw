@@ -1568,6 +1568,15 @@ fn broadcast_live_update(state: &AppState, live: LiveState) {
     let _ = state.ws_tx.send(msg.to_string());
 
     if is_hit(&live) && !prev_hit {
+        // The uid was allocated by `track_analytics_transition` a moment ago.
+        // Sending it with the hit lets the UI join the later `recording_ready`
+        // and `transcript_ready` events to the row it already rendered, instead
+        // of waiting for a refetch.
+        let hit_uid = state
+            .active_hit
+            .lock()
+            .ok()
+            .and_then(|active| active.as_ref().map(|hit| hit.hit_uid.clone()));
         let event = json!({
             "type": "event",
             "timestamp": live.timestamp,
@@ -1577,6 +1586,7 @@ fn broadcast_live_update(state: &AppState, live: LiveState) {
                 "channel": live.channel,
                 "alpha_tag": live.alpha_tag,
                 "rssi": live.rssi,
+                "hit_uid": hit_uid,
             }
         });
         let _ = state.ws_tx.send(event.to_string());

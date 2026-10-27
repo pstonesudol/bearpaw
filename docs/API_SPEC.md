@@ -919,7 +919,215 @@ Get activity log entries with optional filtering.
 
 ---
 
-### 3.7 Additional implemented endpoints
+### 3.7 Audio, recordings and transcription
+
+Every hit can carry one audio file and one transcript. Audio is stored on disk;
+the database holds a **relative** file name and the text.
+
+#### GET /hits
+
+Searchable history. This is the durable view: `GET /analytics/activity-log`
+stays as the unfiltered feed the live dashboard consumes.
+
+**Query parameters (all optional):**
+
+| Parameter | Meaning |
+| --- | --- |
+| `search` | Case-insensitive substring over alpha tag, transcript and frequency (e.g. `amtrak`, `161.1`). |
+| `channel` | Channel number. |
+| `frequency` | Frequency in MHz, matched within 1 kHz. |
+| `frequency_min`, `frequency_max` | Frequency range. |
+| `start_time`, `end_time` | Unix seconds, inclusive. |
+| `has_recording` | `true` / `false`. |
+| `recording_status` | `none`, `recording`, `ready`, `partial`, `too_short`, `failed`, `deleted`, `missing`. |
+| `transcript_status` | `none`, `pending`, `processing`, `completed`, `failed`. |
+| `sort` | `timestamp` (default), `frequency`, `duration`, `channel`. |
+| `order` | `desc` (default) or `asc`. `id` breaks ties so paging is stable. |
+| `limit` | 1–500, default 100. |
+| `offset` | Default 0. |
+
+```json
+{
+  "hits": [
+    {
+      "id": "42",
+      "hit_uid": "1760000000000-3",
+      "timestamp": 1760000000.1,
+      "ended_at": 1760000004.3,
+      "duration": 4.2,
+      "frequency": 161.1,
+      "channel": 12,
+      "alpha_tag": "AMTRAK",
+      "bank": 3,
+      "rssi": 44,
+      "modulation": "NFM",
+      "mode": "SCAN",
+      "session_id": "session-abc123",
+      "scanner_id": "BC125AT",
+      "recording_status": "ready",
+      "recording_file": "1760000000000-3.wav",
+      "recording_duration": 4.9,
+      "recording_bytes": 156800,
+      "recording_error": null,
+      "link_confidence": "exact",
+      "transcript": "Amtrak 215 clear at Zoo",
+      "transcript_status": "completed",
+      "transcript_engine": "whisper-cli",
+      "transcript_error": null,
+      "transcript_attempts": 0,
+      "updated_at": 1760000010.0
+    }
+  ],
+  "total": 1,
+  "limit": 100,
+  "offset": 0
+}
+```
+
+`hit_uid` is allocated at squelch-open and is the durable id. Rows recorded
+before this feature have `hit_uid: null` and no recording. `transcript_original`
+appears only after the user corrects a transcript.
+
+#### GET /hits/{id}
+
+One hit. `{id}` may be the `hit_uid` or the numeric row `id` (which is what
+pre-recording rows have). `404 hit_not_found`.
+
+#### GET /hits/{id}/audio
+
+The WAV file. `Content-Type: audio/wav`, `Accept-Ranges: bytes`. Honours a
+single `Range: bytes=start-end` (including `bytes=-N`) with `206` and
+`Content-Range`; a malformed or multi-range request gets the whole file with
+`200`. `404 recording_not_found` when the hit has no file and
+`404 recording_file_missing` when the row points at a file that is gone.
+
+#### PATCH /hits/{id}/transcript
+
+```json
+{ "transcript": "Amtrak 215 clear at Zoo interlocking" }
+```
+
+The machine output is preserved in `transcript_original` the first time an edit
+is made, so a correction is never destructive. Blank text is allowed.
+`400 transcript_too_long` above 20,000 characters. Returns the updated hit.
+
+#### POST /hits/{id}/transcribe
+
+```json
+{ "force": false }
+```
+
+Queues a local transcription. `force: true` retranscribes a hit that already has
+text. Returns `202 {"hit_uid", "transcript_status": "pending"}`.
+`409 recording_not_available` when the hit has no playable audio or predates
+recordings, and `409 transcription_disabled` when transcription is switched off.
+A retranscription refreshes `transcript_original` (the machine text) but keeps
+the user's correction as `transcript`.
+
+#### DELETE /hits/{id}/recording
+
+Deletes the audio file **and** the transcript. The hit row stays, so frequency,
+channel, timestamps and analytics are unaffected.
+`404 recording_not_found` when there is nothing to delete.
+
+#### GET /audio/devices
+
+Input devices, the current selection, capture status, and the transcription
+setup as Bearpaw resolves it:
+
+```json
+{
+  "devices": [
+    { "name": "Cubilux USB Audio", "is_default": false, "channels": 2, "sample_rate": 48000 }
+  ],
+  "selected": "Cubilux USB Audio",
+  "status": {
+    "enabled": true,
+    "active_hit": false,
+    "recordings_dir": "/Users/me/Library/Application Support/Bearpaw/recordings",
+    "retention_days": 30,
+    "capture": {
+      "running": true,
+      "connected": true,
+      "device": "Cubilux USB Audio",
+      "last_error": null,
+      "level_db": -34.2,
+      "dropped_chunks": 0
+    }
+  },
+  "models": [{ "name": "ggml-base.en.bin", "path": "…", "size_bytes": 147951465 }],
+  "models_dir": "/Users/me/Library/Application Support/Bearpaw/models",
+  "transcription": {
+    "enabled": true,
+    "language": "en",
+    "resolved_binary": "/opt/homebrew/bin/whisper-cli",
+    "resolved_model": "/Users/me/Library/Application Support/Bearpaw/models/ggml-base.en.bin"
+  }
+}
+```
+
+#### GET /audio/status
+
+Just the `status` object above. Poll it while a settings sheet is open for the
+input level; it does not start or stop capture.
+
+#### GET /recordings/summary
+
+Library totals for the history header. Counts rows that still reference audio,
+so it sizes what the list can play rather than every file in the folder.
+
+```json
+{
+  "count": 48,
+  "bytes": 9526154,
+  "oldest_timestamp": 1760000000.1,
+  "failed_transcripts": 41,
+  "untranscribed": 20,
+  "hits_total": 51,
+  "retention_days": 30
+}
+```
+
+`oldest_timestamp` is `null` for an empty library. `retention_days: 0` means
+"keep until the hit itself ages out of analytics retention". `hits_total` counts
+every hit, recorded or not, so a recordings view can label its "all" filter;
+`untranscribed` counts playable audio whose transcript is missing or still in
+flight. This is separate from `/audio/status` on purpose: that one is polled for
+the input level, and this runs a database aggregate.
+
+#### GET /hits/{id}/waveform
+
+Peak shape of the stored WAV, for drawing a row without downloading its audio.
+
+**Query parameters:** `buckets` (8–512, default 64).
+
+```json
+{
+  "buckets": [0, 12, 48, 100, 100, 63],
+  "peak_dbfs": -0.0,
+  "clipped": true
+}
+```
+
+`buckets` is always the requested length, with each value 0–100. `clipped` is
+true when at least 0.2% of samples sit at the clip threshold — the condition that
+turns a transcription into `transcription_empty`. `404 recording_not_found` when
+the hit has no file, `404 recording_file_missing` when it is gone, and `500` with
+`waveform_unreadable` / `waveform_unsupported_format` for a file that is not
+16-bit PCM.
+
+#### POST /audio/test
+
+```json
+{ "seconds": 3 }
+```
+
+Records a short clip with its own stream and writes it under
+`<recordings>/_tests/`. Returns `{"file": "_tests/test-….wav", "duration_secs": 3.0}`.
+An unusable device is `400` with the same `audio_*` code the capture status
+reports.
+
+### 3.8 Additional implemented endpoints
 
 These routes are implemented (see `crates/bearpaw-api/src/api/mod.rs` `router()`
 and `handlers/`) but were not previously covered above. Listed here so the spec

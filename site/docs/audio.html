@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Audio &amp; Transcription — Bearpaw docs</title>
+    <meta
+      name="description"
+      content="Record scanner hits from a USB line-in adapter and transcribe them offline with whisper.cpp. Setup, permissions, storage, and limitations."
+    />
+    <link rel="icon" type="image/png" sizes="32x32" href="../assets/favicon-32.png" />
+    <link rel="stylesheet" href="../style.css" />
+    <link rel="stylesheet" href="docs.css" />
+    <!-- Google Analytics (GA4) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-VWKWBEC25R"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag() {
+        dataLayer.push(arguments);
+      }
+      gtag("js", new Date());
+      gtag("config", "G-VWKWBEC25R");
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#content">Skip to content</a>
+    <header class="site-header">
+      <a class="brand" href="../index.html">
+        <img src="../assets/app-icon.png" alt="" class="brand-icon" />
+        <span class="brand-name">Bearpaw</span>
+      </a>
+      <nav class="site-nav" aria-label="Primary">
+        <a href="index.html">Docs</a>
+        <a href="../index.html#download">Download</a>
+        <a href="https://github.com/jeremyfuksa/bearpaw">GitHub</a>
+      </nav>
+    </header>
+
+    <div class="docs-layout">
+      <aside class="docs-sidebar">
+        <p class="docs-sidebar-title" id="guide-nav-title">User Guide</p>
+        <nav aria-labelledby="guide-nav-title">
+          <ul class="docs-nav">
+            <li><a href="index.html">Overview</a></li>
+            <li><a href="getting-started.html">Getting Started</a></li>
+            <li><a href="scan.html">The Scan Tab</a></li>
+            <li><a href="channels.html">The Channels Tab</a></li>
+            <li><a href="device.html">The Device Tab</a></li>
+            <li class="docs-nav-child"><a href="device-config.html">Device Config</a></li>
+            <li class="docs-nav-child"><a href="close-call.html">Close Call</a></li>
+            <li class="docs-nav-child"><a href="service-search.html">Service Search</a></li>
+            <li class="docs-nav-child"><a href="custom-search.html">Custom Search</a></li>
+            <li class="docs-nav-child"><a href="locked-channels.html">Locked Channels</a></li>
+            <li class="docs-nav-child"><a href="preferences.html">Preferences</a></li>
+            <li class="docs-nav-child">
+              <a href="audio.html" aria-current="page">Audio &amp; Transcription</a>
+            </li>
+            <li><a href="troubleshooting.html">Menu &amp; Troubleshooting</a></li>
+            <li><a href="glossary.html">Glossary</a></li>
+          </ul>
+        </nav>
+      </aside>
+
+      <main class="docs-content" id="content">
+        <h1>Audio &amp; Transcription</h1>
+        <p>
+          Bearpaw can record the audio of each scanner hit and transcribe it on
+          your Mac. Everything stays on the computer: audio is written to a
+          folder you choose, and transcription runs locally with
+          <a href="https://github.com/ggerganov/whisper.cpp">whisper.cpp</a>.
+          Nothing is uploaded.
+        </p>
+
+        <h2 id="what-you-need">What you need</h2>
+        <ul>
+          <li>
+            An audio input on your Mac. A USB-C capture adapter with a 3.5 mm
+            line input works well; the Cubilux adapter is what this was designed
+            against.
+          </li>
+          <li>
+            A 3.5 mm cable from the scanner's <strong>headphone</strong> jack to
+            the adapter's line input. The BC125AT has no speaker output.
+          </li>
+          <li>
+            The scanner's USB cable, as usual. Control and audio are separate
+            connections; unplugging one does not stop the other.
+          </li>
+        </ul>
+
+        <p>
+          The scanner has one receiver, so Bearpaw records one transmission at a
+          time. That is a property of the radio, not a limitation of the app.
+        </p>
+
+        <h2 id="turn-it-on">Turn it on</h2>
+        <ol>
+          <li>
+            Open <strong>Device → Preferences → Audio &amp; Transcription</strong>
+            and choose <strong>Configure</strong>.
+          </li>
+          <li>
+            Turn on <strong>Record scanner hits</strong>, then pick your adapter
+            under <strong>Input device</strong>. The level meter should move when
+            the scanner receives a signal. If it does not, check the macOS
+            microphone permission below.
+          </li>
+          <li>
+            Use <strong>Test recording</strong> to capture a few seconds and
+            confirm the adapter is delivering audio.
+          </li>
+        </ol>
+
+        <p>
+          Recording is off until you turn it on. While it is on, Bearpaw keeps a
+          short rolling buffer so the start of a transmission is not clipped,
+          and keeps recording briefly after the squelch closes so the end is not
+          cut off.
+        </p>
+
+        <h2 id="permission">macOS microphone permission</h2>
+        <p>
+          macOS treats any audio input as a microphone. The first time Bearpaw
+          records, it asks for permission. If you dismissed the prompt, enable
+          Bearpaw under <strong>System Settings → Privacy &amp; Security →
+          Microphone</strong> and relaunch.
+        </p>
+        <p>
+          A denied permission can produce a file of silence rather than an
+          error. If recordings are silent, check this first. If you run the
+          backend from a terminal instead of the app, the terminal is the app
+          that needs permission.
+        </p>
+
+        <h2 id="transcription">Transcription</h2>
+        <p>
+          Transcription needs two things Bearpaw does not bundle: the
+          <code>whisper-cli</code> program and a model file. Install them once:
+        </p>
+        <pre><code>brew install whisper-cpp
+mkdir -p "$HOME/Library/Application Support/Bearpaw/models"
+curl -L -o "$HOME/Library/Application Support/Bearpaw/models/ggml-base.en.bin" \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin</code></pre>
+        <p>
+          <code>base.en</code> is a good default: about 150 MB and faster than
+          real time on Apple Silicon. Models in the Bearpaw models folder appear
+          in the selector automatically. Both the program and the model can be
+          pointed at explicitly in the same settings sheet.
+        </p>
+        <p>
+          <strong>Vocabulary</strong> is a comma-separated list of words whisper
+          should spell correctly — your railroads, interlockings, and local
+          place names. A short list of words that actually come up helps more
+          than a long glossary. Bearpaw ships a starting list for SEPTA, Norfolk
+          Southern and Amtrak traffic.
+        </p>
+
+        <h2 id="what-you-get">What you get</h2>
+        <ul>
+          <li>
+            A small microphone marker on a Recent Hit means its audio was kept.
+            A dot beside it shows transcription state: green finished, amber
+            working, red failed.
+          </li>
+          <li>
+            Select a hit to open its details: a player, the full transcript, and
+            buttons to correct the transcript, transcribe again, or delete the
+            recording.
+          </li>
+          <li>
+            <strong>History</strong> next to Recent Hits searches every stored
+            hit by channel name, frequency, date range, transcript text, whether
+            audio exists, and transcription state.
+          </li>
+          <li>
+            Correcting a transcript never destroys the machine version. Bearpaw
+            keeps it and shows it under <em>Machine transcript</em>.
+          </li>
+        </ul>
+
+        <h2 id="storage">Storage and retention</h2>
+        <p>
+          Audio is written to <code>recordings</code> in Bearpaw's application
+          data folder unless you choose another folder in the settings sheet.
+          Files are 16 kHz mono WAV, about 32 KB per second of audio.
+        </p>
+        <p>
+          <strong>Keep audio for</strong> controls how long files stay. Setting
+          it to 0 keeps audio until the hit itself ages out under
+          <a href="preferences.html">Data Retention</a>. When audio expires or is
+          deleted, the hit and its timestamps stay in history; only the
+          recording and transcript go.
+        </p>
+
+        <h2 id="limits">Limits worth knowing</h2>
+        <ul>
+          <li>
+            Hit boundaries come from the scanner's squelch, which Bearpaw polls
+            five times a second. A recording can start up to about 200 ms after
+            the transmission actually began. The pre-roll is there to cover that
+            gap, not to eliminate it.
+          </li>
+          <li>
+            If the scanner changes frequency without the squelch closing, the
+            file cannot be split into two transmissions. Bearpaw keeps the audio
+            and labels it <em>partial</em> rather than attributing it to one
+            frequency.
+          </li>
+          <li>
+            Unplugging the audio adapter mid-transmission keeps the audio
+            written so far and marks it partial. Scanning continues.
+          </li>
+          <li>
+            Transcripts are best-effort. Radio noise, clipped audio and local
+            proper nouns all cause errors. Listen to the recording before relying
+            on a transcript.
+          </li>
+        </ul>
+
+        <h2 id="troubleshooting">Troubleshooting</h2>
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Symptom</th>
+              <th scope="col">Check</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>No microphone marker on hits</td>
+              <td>Recording is on, and the hit is longer than Minimum recording.</td>
+            </tr>
+            <tr>
+              <td>Files are silent</td>
+              <td>macOS microphone permission for Bearpaw (or your terminal).</td>
+            </tr>
+            <tr>
+              <td>“Audio input device not found”</td>
+              <td>The adapter is unplugged or renamed. Re-select it; capture retries every few seconds.</td>
+            </tr>
+            <tr>
+              <td>“whisper-cli was not found”</td>
+              <td>Install it with <code>brew install whisper-cpp</code> or set its path.</td>
+            </tr>
+            <tr>
+              <td>“No whisper model found”</td>
+              <td>Put a GGML <code>.bin</code> model in the Bearpaw models folder, or select one.</td>
+            </tr>
+            <tr>
+              <td>Transcript is nonsense</td>
+              <td>Add the local names to Vocabulary, and check the audio is not clipped.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p>
+          The engineering notes — exact storage paths, resource estimates and the
+          hardware test plan — live in the repository at
+          <a href="https://github.com/jeremyfuksa/bearpaw/blob/main/docs/AUDIO_RECORDING.md"
+            >docs/AUDIO_RECORDING.md</a
+          >.
+        </p>
+      </main>
+    </div>
+  </body>
+</html>

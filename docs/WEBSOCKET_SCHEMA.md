@@ -50,7 +50,7 @@ hit); they are omitted or null otherwise.
 
 ### event
 
-Two event subtypes are carried under `type: "event"`, distinguished by `event`.
+Event subtypes are carried under `type: "event"`, distinguished by `event`.
 
 **`scan_hit`** — squelch just opened on a signal:
 
@@ -63,10 +63,59 @@ Two event subtypes are carried under `type: "event"`, distinguished by `event`.
     "frequency": 151.2500,
     "channel": 25,
     "alpha_tag": "Police Dispatch",
-    "rssi": 75
+    "rssi": 75,
+    "hit_uid": "1760000000000-3"
   }
 }
 ```
+
+`hit_uid` is allocated when the squelch opens and is the durable id written on
+the hit row, the audio file name, and every transcript event below. A client
+that wants to attach a later recording or transcript to the row it just rendered
+must keep this value.
+
+**`recording_ready`** — a hit's audio finished (or was discarded/failed):
+
+```json
+{
+  "type": "event",
+  "timestamp": 1760000005.2,
+  "event": "recording_ready",
+  "data": {
+    "hit_uid": "1760000000000-3",
+    "recording_status": "ready",
+    "recording_duration": 4.9,
+    "link_confidence": "exact",
+    "recording_error": null
+  }
+}
+```
+
+`recording_status` is `ready`, `partial`, `too_short` or `failed`.
+`link_confidence` is `exact` or `uncertain`; `uncertain` means the audio is real
+but the scanner changed frequency or the device dropped out mid-transmission, so
+the file may not be the whole transmission. Both fields are on the hit row too,
+so a client that misses this event loses nothing permanent.
+
+**`transcript_ready`** — a transcription job changed state:
+
+```json
+{
+  "type": "event",
+  "timestamp": 1760000010.0,
+  "event": "transcript_ready",
+  "data": {
+    "hit_uid": "1760000000000-3",
+    "transcript_status": "completed",
+    "transcript": "Amtrak 215 clear at Zoo",
+    "transcript_engine": "whisper-cli",
+    "transcript_error": null
+  }
+}
+```
+
+Sent for `processing`, `completed` and `failed`. `transcript` is only present on
+`completed`; `transcript_error` only on `failed`.
 
 **`state_stale`** — the backend stopped receiving fresh polls (scanner went
 quiet or disconnected):

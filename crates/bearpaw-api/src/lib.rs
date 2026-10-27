@@ -3,12 +3,16 @@
 //! Used by the Tauri desktop app (in-process server) or as a standalone binary.
 
 pub mod api;
+pub mod audio;
 pub mod config;
 pub mod logging;
 pub mod protocol;
+pub mod recordings;
 pub mod state;
+pub mod transcription;
 pub mod transport;
 pub mod transport_usb;
+pub mod waveform;
 
 pub use api::{
     default_state, run_server, run_server_with_shutdown, spawn_poll_loop, PortResolver, ScannerLink,

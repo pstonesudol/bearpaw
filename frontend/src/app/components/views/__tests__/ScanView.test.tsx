@@ -185,6 +185,7 @@ describe('ScanView Recent Hits rendering', () => {
     onVolumeChange: () => {},
     onBankToggle: () => {},
     onOpenActivityExport: () => {},
+    onOpenRecordings: () => {},
   };
 
   beforeEach(() => {
@@ -352,6 +353,7 @@ describe('Activity Heatmap accessibility', () => {
       onVolumeChange: () => {},
       onBankToggle: () => {},
       onOpenActivityExport: () => {},
+      onOpenRecordings: () => {},
     };
 
     beforeEach(() => {
@@ -402,6 +404,7 @@ describe('Recent Hits export control', () => {
     onVolumeChange: () => {},
     onBankToggle: () => {},
     onOpenActivityExport: () => {},
+    onOpenRecordings: () => {},
   };
 
   beforeEach(() => {

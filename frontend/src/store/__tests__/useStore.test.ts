@@ -113,6 +113,44 @@ describe('useStore', () => {
     });
   });
 
+  describe('updateActivityLogEntry', () => {
+    it('merges a finished recording into the entry with that uid', () => {
+      useStore.setState({
+        fullActivityLog: [
+          { id: 'a', timestamp: 300, frequency: 160.725, type: 'hit', hit_uid: 'h-1' },
+          { id: 'b', timestamp: 200, frequency: 161.1, type: 'hit', hit_uid: 'h-2' },
+        ],
+      });
+      act(() => {
+        useStore.getState().updateActivityLogEntry('h-1', {
+          recording_status: 'ready',
+          recording_duration: 4.2,
+          transcript_status: 'completed',
+          transcript: 'NS 24 clear',
+        });
+      });
+
+      const [first, second] = useStore.getState().fullActivityLog;
+      expect(first.recording_status).toBe('ready');
+      expect(first.transcript).toBe('NS 24 clear');
+      // The other row must not be touched: a merge keyed only on "the newest
+      // entry" would stamp this recording onto h-2 as well.
+      expect(second.recording_status).toBeUndefined();
+    });
+
+    it('ignores an update for a hit that is not on screen', () => {
+      useStore.setState({
+        fullActivityLog: [
+          { id: 'a', timestamp: 300, frequency: 160.725, type: 'hit', hit_uid: 'h-1' },
+        ],
+      });
+      act(() => {
+        useStore.getState().updateActivityLogEntry('h-9', { recording_status: 'ready' });
+      });
+      expect(useStore.getState().fullActivityLog[0].recording_status).toBeUndefined();
+    });
+  });
+
   describe('hydrateActivityLogs', () => {
     beforeEach(() => {
       useStore.setState({ fullActivityLog: [] });
@@ -391,6 +429,19 @@ describe('useStore', () => {
       reread_memory_on_connect: false,
       analytics_scope: 'all',
       activity_export_timezone: 'utc',
+      audio_recording_enabled: true,
+      audio_input_device: 'Cubilux USB Audio',
+      audio_pre_roll_ms: 800,
+      audio_post_roll_ms: 1200,
+      audio_min_duration_ms: 700,
+      audio_storage_dir: '/Volumes/Radio',
+      audio_retention_days: 90,
+      transcription_enabled: false,
+      transcription_binary: '/opt/homebrew/bin/whisper-cli',
+      transcription_model: 'ggml-base.en.bin',
+      transcription_language: 'en',
+      transcription_vocabulary: 'SEPTA, Amtrak',
+      transcription_threads: 6,
     };
 
     it('restores analyticsScope from the backend', () => {
@@ -413,7 +464,29 @@ describe('useStore', () => {
         rereadMemoryOnConnect: false,
         analyticsScope: 'all',
         activityExportTimezone: 'utc',
+        audioRecordingEnabled: true,
+        audioInputDevice: 'Cubilux USB Audio',
+        audioPreRollMs: 800,
+        audioPostRollMs: 1200,
+        audioMinDurationMs: 700,
+        audioStorageDir: '/Volumes/Radio',
+        audioRetentionDays: 90,
+        transcriptionEnabled: false,
+        transcriptionBinary: '/opt/homebrew/bin/whisper-cli',
+        transcriptionModel: 'ggml-base.en.bin',
+        transcriptionLanguage: 'en',
+        transcriptionVocabulary: 'SEPTA, Amtrak',
+        transcriptionThreads: 6,
       });
+    });
+
+    it('keeps a stored false for audioRecordingEnabled', () => {
+      // Same hazard as the two update switches: recording is the kind of
+      // always-on side effect a user turns off once and expects to stay off.
+      expect(mapStoredPreferences({ audio_recording_enabled: false }).audioRecordingEnabled).toBe(
+        false,
+      );
+      expect(mapStoredPreferences({}).audioRecordingEnabled).toBe(false);
     });
 
     it('covers every key in the store defaults', () => {
@@ -439,6 +512,19 @@ describe('useStore', () => {
         rereadMemoryOnConnect: true,
         analyticsScope: 'scanner',
         activityExportTimezone: 'local',
+        audioRecordingEnabled: false,
+        audioInputDevice: '',
+        audioPreRollMs: 500,
+        audioPostRollMs: 750,
+        audioMinDurationMs: 500,
+        audioStorageDir: '',
+        audioRetentionDays: 30,
+        transcriptionEnabled: true,
+        transcriptionBinary: '',
+        transcriptionModel: '',
+        transcriptionLanguage: 'en',
+        transcriptionVocabulary: '',
+        transcriptionThreads: 4,
       });
     });
 

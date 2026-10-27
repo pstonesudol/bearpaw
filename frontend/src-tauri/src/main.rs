@@ -25,6 +25,7 @@ mod updates;
 mod menu_ids {
     // View menu — navigate between the three top-level tabs.
     pub const NAV_SCAN: &str = "bearpaw:nav:scan";
+    pub const NAV_RECORDINGS: &str = "bearpaw:nav:recordings";
     pub const NAV_DEVICE: &str = "bearpaw:nav:device";
     pub const NAV_CHANNELS: &str = "bearpaw:nav:channels";
 
@@ -329,7 +330,7 @@ fn build_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Men
         .select_all()
         .build()?;
 
-    // View: navigate between the three top-level tabs. ⌘1/⌘2/⌘3 match
+    // View: navigate between the top-level tabs. ⌘1/⌘2/⌘3 match
     // common Mac muscle memory (Safari, Finder, etc.).
     let view_submenu = SubmenuBuilder::new(app, "View")
         .item(
@@ -338,13 +339,18 @@ fn build_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Men
                 .build(app)?,
         )
         .item(
-            &MenuItemBuilder::with_id(menu_ids::NAV_DEVICE, "Device")
+            &MenuItemBuilder::with_id(menu_ids::NAV_RECORDINGS, "Recordings")
                 .accelerator("CmdOrCtrl+2")
                 .build(app)?,
         )
         .item(
-            &MenuItemBuilder::with_id(menu_ids::NAV_CHANNELS, "Channels")
+            &MenuItemBuilder::with_id(menu_ids::NAV_DEVICE, "Device")
                 .accelerator("CmdOrCtrl+3")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id(menu_ids::NAV_CHANNELS, "Channels")
+                .accelerator("CmdOrCtrl+4")
                 .build(app)?,
         )
         .build()?;

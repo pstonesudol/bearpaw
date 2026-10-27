@@ -2,7 +2,7 @@ import { useRef } from 'react';
 import bearpawLogo from '@/assets/bearpaw-logo.svg';
 import type { Tab } from '../App';
 
-const TABS: Tab[] = ['Scan', 'Channels', 'Device'];
+const TABS: Tab[] = ['Scan', 'Recordings', 'Channels', 'Device'];
 
 interface TabBarProps {
   currentTab: Tab;
@@ -10,7 +10,7 @@ interface TabBarProps {
 }
 
 /**
- * In-window navigation across the three views. Shares `currentTab` state
+ * In-window navigation across the views. Shares `currentTab` state
  * with the native menu (File/View), so clicking a tab and picking the
  * matching menu item flip the same state — the two paths never drift.
  *

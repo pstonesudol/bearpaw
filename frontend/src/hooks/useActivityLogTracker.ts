@@ -84,7 +84,40 @@ export function useActivityLogTracker(): void {
         hasAudio: false,
         duration: 0,
         ended_at: 0,
+        // The durable id is allocated by the backend at squelch-open, before
+        // the hit row exists. Carrying it here is what lets the later
+        // `recording_ready` and `transcript_ready` events find this row.
+        hit_uid: payload.data.hit_uid ?? null,
       };
+    });
+
+    // Recording and transcription finish after the hit row is already on
+    // screen, on their own threads. Updating by uid keeps that merge O(n) over
+    // the log and independent of which row a rolled-up Recent Hits group
+    // happens to display.
+    const unsubscribeMedia = ws.on('event', (message) => {
+      const payload = message as EventMessage;
+      if (payload.event !== 'recording_ready' && payload.event !== 'transcript_ready') return;
+      const hitUid = payload.data.hit_uid;
+      if (typeof hitUid !== 'string' || hitUid.length === 0) return;
+      const patch: Partial<ActivityLogEntry> =
+        payload.event === 'recording_ready'
+          ? {
+              recording_status: payload.data.recording_status,
+              recording_duration: payload.data.recording_duration ?? null,
+              link_confidence: payload.data.link_confidence ?? null,
+              hasAudio:
+                payload.data.recording_status === 'ready' ||
+                payload.data.recording_status === 'partial',
+            }
+          : {
+              transcript_status: payload.data.transcript_status,
+              ...(payload.data.transcript !== undefined && payload.data.transcript !== null
+                ? { transcript: payload.data.transcript }
+                : {}),
+              transcript_error: payload.data.transcript_error ?? null,
+            };
+      useStore.getState().updateActivityLogEntry(hitUid, patch);
     });
 
     // Reset the local gate on every (re)connect (#261): a restarted backend
@@ -108,6 +141,7 @@ export function useActivityLogTracker(): void {
     return () => {
       unsubscribeState();
       unsubscribeEvent();
+      unsubscribeMedia();
       unsubscribeConnection();
     };
   }, [addToFullActivityLog, ws]);

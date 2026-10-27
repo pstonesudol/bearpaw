@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    macOS attributes microphone access to the app bundle that asks for it.
+    Without this key the capture stream opens but delivers silence (or the
+    process is terminated), which is the least debuggable failure in the
+    feature. Tauri merges src-tauri/Info.plist into the built bundle.
+  -->
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Bearpaw records scanner audio from your audio input so hits can be replayed and transcribed locally on this Mac. Audio never leaves the computer.</string>
+</dict>
+</plist>

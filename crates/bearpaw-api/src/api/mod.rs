@@ -6,6 +6,7 @@
 mod channel_cache;
 mod control;
 mod handlers;
+pub(crate) mod hit_store;
 mod memory_sync;
 mod poll;
 mod program_mode;
@@ -38,7 +39,9 @@ use tracing::{error, info, warn};
 
 use crate::protocol::capabilities::ScannerCapabilities;
 use crate::protocol::{classify_response, parse_cin_response, tones, ScannerReply};
+use crate::recordings::{RecordingService, RecordingSettings};
 use crate::state::{ChannelData, DeviceInfo, LiveState, ScannerMode, ShadowState};
+use crate::transcription::{TranscriptionService, TranscriptionSettings};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -54,10 +57,19 @@ pub struct AppState {
     pub analytics_log: Arc<Mutex<Vec<ActivityHit>>>,
     pub active_hit: Arc<Mutex<Option<ActiveHit>>>,
     pub next_hit_id: Arc<AtomicU64>,
+    /// Counter for durable hit uids. Unlike `next_hit_id` this is consumed at
+    /// squelch-open, because the recorder needs the id before the row exists.
+    pub next_hit_uid: Arc<AtomicU64>,
     pub session_id: Arc<String>,
     pub preferences_db_path: Arc<String>,
     pub analytics_db_path: Arc<String>,
     pub preferences: Arc<Mutex<Map<String, Value>>>,
+    /// Audio capture, hit segmentation and audio-file retention. Started only
+    /// when the user enables recording; every method is safe to call when it
+    /// is stopped.
+    pub recordings: Arc<RecordingService>,
+    /// Offline transcription queue. Recording works with this stopped.
+    pub transcription: Arc<TranscriptionService>,
     pub ws_tx: broadcast::Sender<String>,
     pub sequence: Arc<AtomicU64>,
     /// Held across sequence take + ws_tx.send so two producers can't take
@@ -82,6 +94,24 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Push the audio and transcription preferences into the live services.
+    ///
+    /// Preferences are stored generically, so without this the recorder and the
+    /// transcription worker keep the values they had at launch: changing the
+    /// model, device or vocabulary appears saved and does nothing until the
+    /// next restart. Called only for `audio_*` / `transcription_*` writes.
+    ///
+    /// Blocking: stopping capture joins its thread. HTTP handlers call this on
+    /// a blocking task, never on a runtime worker.
+    pub fn apply_media_preferences(&self) {
+        let prefs = self.preferences.lock().unwrap().clone();
+        let data_dir = default_data_dir();
+        let (recording_settings, root) = RecordingSettings::from_preferences(&prefs, &data_dir);
+        self.recordings.apply_settings(recording_settings, root);
+        self.transcription
+            .update_settings(TranscriptionSettings::from_preferences(&prefs, &data_dir));
+    }
+
     /// Capabilities of the connected scanner, or the BC125AT-family defaults.
     ///
     /// Defaults rather than `None` so callers never handle a third state that
@@ -174,10 +204,94 @@ pub struct ActivityHit {
     /// channel numbers comparable. Telling two units of the SAME model apart
     /// needs the identity work in #414.
     pub scanner_id: Option<String>,
+    /// Durable id for this hit, allocated at squelch-open.
+    ///
+    /// `id` is a session counter (and the database rowid for persisted rows);
+    /// it is not stable enough to name an audio file after a restart. This uid
+    /// is generated once, written on both the hit row and the file name, and
+    /// is what every recording and transcript endpoint keys on. Rows recorded
+    /// before this feature have `None` — they keep their history, just without
+    /// audio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hit_uid: Option<String>,
+    /// `none` | `recording` | `ready` | `partial` | `too_short` | `failed` |
+    /// `deleted` | `missing`.
+    #[serde(default = "default_media_status")]
+    pub recording_status: String,
+    /// File name relative to the recordings root. Never an absolute path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_duration: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_bytes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_error: Option<String>,
+    /// `exact` or `uncertain`: whether this file is known to belong to this
+    /// hit, or merely likely to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_confidence: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<String>,
+    /// The machine output, present only after the user corrected it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_original: Option<String>,
+    /// `none` | `pending` | `processing` | `completed` | `failed`.
+    #[serde(default = "default_media_status")]
+    pub transcript_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_engine: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_error: Option<String>,
+    #[serde(default)]
+    pub transcript_attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<f64>,
+}
+
+fn default_media_status() -> String {
+    "none".to_string()
+}
+
+impl Default for ActivityHit {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            timestamp: 0.0,
+            frequency: 0.0,
+            channel: None,
+            alpha_tag: None,
+            rssi: 0,
+            duration: 0.0,
+            modulation: String::new(),
+            mode: ScannerMode::Scan,
+            bank: None,
+            session_id: String::new(),
+            ended_at: 0.0,
+            scanner_id: None,
+            hit_uid: None,
+            recording_status: default_media_status(),
+            recording_file: None,
+            recording_duration: None,
+            recording_bytes: None,
+            recording_error: None,
+            link_confidence: None,
+            transcript: None,
+            transcript_original: None,
+            transcript_status: default_media_status(),
+            transcript_engine: None,
+            transcript_error: None,
+            transcript_attempts: 0,
+            updated_at: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct ActiveHit {
+    /// Allocated when the squelch opens, so the recorder and the eventual hit
+    /// row cannot be joined by guesswork later.
+    pub hit_uid: String,
     pub timestamp: f64,
     pub frequency: f64,
     pub channel: Option<u16>,
@@ -208,7 +322,7 @@ const CHANNEL_CACHE_FLUSH_SECS: u64 = 30;
 /// scanner session (#688). One USB tick is at worst three 500 ms transfers plus
 /// the 200 ms interval, so 3 s covers it with room; past that, exit anyway.
 const POLL_LOOP_STOP_TIMEOUT: Duration = Duration::from_secs(3);
-const ANALYTICS_SCHEMA_VERSION: i32 = 2;
+const ANALYTICS_SCHEMA_VERSION: i32 = 3;
 
 /// How many recorded hits are loaded into the in-memory activity log at
 /// startup, **per scanner**.
@@ -224,7 +338,48 @@ const ANALYTICS_HIT_LOAD_CAP: usize = 5000;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/health", get(handlers::status::get_health))
+        // Audio capture, recordings and transcripts. `/hits` is the searchable
+        // history view; the pre-existing `/analytics/activity-log` stays as the
+        // unauthenticated-simple feed the live dashboard already consumes.
+        .route(
+            "/api/v1/audio/devices",
+            get(handlers::recordings::get_audio_devices),
+        )
+        .route(
+            "/api/v1/audio/status",
+            get(handlers::recordings::get_audio_status),
+        )
+        .route(
+            "/api/v1/audio/test",
+            post(handlers::recordings::post_audio_test),
+        )
+        .route("/api/v1/hits", get(handlers::recordings::get_hits))
+        .route("/api/v1/hits/{id}", get(handlers::recordings::get_hit))
+        .route(
+            "/api/v1/hits/{id}/audio",
+            get(handlers::recordings::get_hit_audio),
+        )
+        .route(
+            "/api/v1/hits/{id}/transcript",
+            patch(handlers::recordings::patch_transcript),
+        )
+        .route(
+            "/api/v1/hits/{id}/transcribe",
+            post(handlers::recordings::post_transcribe),
+        )
+        .route(
+            "/api/v1/hits/{id}/recording",
+            delete(handlers::recordings::delete_recording),
+        )
+        .route(
+            "/api/v1/hits/{id}/waveform",
+            get(handlers::recordings::get_hit_waveform),
+        )
         .route("/api/v1/status", get(handlers::status::get_status))
+        .route(
+            "/api/v1/recordings/summary",
+            get(handlers::recordings::get_recordings_summary),
+        )
         .route(
             "/api/v1/device/info",
             get(handlers::status::get_device_info),
@@ -676,6 +831,16 @@ pub async fn run_server_with_shutdown(
                 deleted_records = deleted,
                 "analytics cleanup run complete"
             );
+            // Recording retention, missing-file reconciliation and the orphan
+            // sweep travel with the analytics timer: they are the same kind of
+            // housekeeping and answering "how long does a hit live" in two
+            // places is how they drift apart.
+            let reconcile_state = cleanup_state.recordings.clone();
+            if let Ok(report) =
+                tokio::task::spawn_blocking(move || reconcile_state.reconcile()).await
+            {
+                info!(?report, "recording housekeeping run complete");
+            }
             tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
         }
     });
@@ -723,6 +888,12 @@ pub async fn run_server_with_shutdown(
             );
         }
     }
+    // Audio first: stopping capture flushes the segment that is open right
+    // now, before the process can exit mid-transmission. The transcription
+    // worker is stopped after it, so a job that was queued by the flush either
+    // finishes or is requeued by the next launch (its row stays `pending`).
+    shutdown_state.recordings.stop();
+    shutdown_state.transcription.stop();
     // Final flush before exit. This is the one that makes a clean quit lose
     // nothing: without it, up to CHANNEL_CACHE_FLUSH_SECS of channel edits
     // would be absent from the cache on next launch, and the user would see
@@ -781,7 +952,34 @@ pub fn default_state() -> AppState {
         .unwrap_or(0);
 
     let (ws_tx, _) = broadcast::channel(64);
-    AppState {
+    let data_dir = default_data_dir();
+    let (recording_settings, configured_recordings_root) =
+        RecordingSettings::from_preferences(&loaded_preferences, &data_dir);
+    let transcription_settings =
+        TranscriptionSettings::from_preferences(&loaded_preferences, &data_dir);
+    // One recordings root per test state; production keeps the configured one.
+    // `cfg!` is not enough: the test-only helper must not be referenced in a
+    // release build at all.
+    #[cfg(test)]
+    let recordings_root = unique_test_dir("recordings");
+    #[cfg(not(test))]
+    let recordings_root = configured_recordings_root;
+    let recordings_root = Arc::new(Mutex::new(recordings_root));
+    let transcription = TranscriptionService::new(
+        Arc::new(analytics_db_path.clone()),
+        ws_tx.clone(),
+        transcription_settings,
+        recordings_root.clone(),
+    );
+    let recordings = RecordingService::new(
+        Arc::new(analytics_db_path.clone()),
+        ws_tx.clone(),
+        transcription.clone(),
+        recording_settings,
+        recordings_root,
+    );
+
+    let state = AppState {
         live: Arc::new(std::sync::RwLock::new(LiveState::default())),
         device: Arc::new(std::sync::RwLock::new(DeviceInfo {
             connection_status: "disconnected".to_string(),
@@ -807,10 +1005,13 @@ pub fn default_state() -> AppState {
         analytics_log: Arc::new(Mutex::new(loaded_hits)),
         active_hit: Arc::new(Mutex::new(None)),
         next_hit_id: Arc::new(AtomicU64::new(next_hit_id)),
+        next_hit_uid: Arc::new(AtomicU64::new(0)),
         session_id: Arc::new(format!("session-{}", uuid_simple())),
         preferences_db_path: Arc::new(preferences_db_path),
         analytics_db_path: Arc::new(analytics_db_path),
         preferences: Arc::new(Mutex::new(loaded_preferences)),
+        recordings,
+        transcription,
         ws_tx,
         sequence: Arc::new(AtomicU64::new(0)),
         sequence_send: Arc::new(Mutex::new(())),
@@ -821,7 +1022,24 @@ pub fn default_state() -> AppState {
         program_mode_session: Arc::new(Mutex::new(None)),
         program_mode_active: Arc::new(AtomicBool::new(false)),
         lockout_walk: Arc::new(tokio::sync::Mutex::new(())),
+    };
+
+    // Tests construct this ~30 times and must not touch audio hardware or
+    // sweep a shared directory; production does both, but the sweep is moved
+    // off the startup path because retention can delete many files.
+    if !cfg!(test) {
+        state.transcription.start();
+        if state.recordings.settings().enabled {
+            state.recordings.start();
+        }
+        let sweep = state.recordings.clone();
+        std::thread::spawn(move || {
+            let report = sweep.reconcile();
+            tracing::info!(?report, "recording reconciliation complete");
+        });
     }
+
+    state
 }
 
 pub(crate) fn default_preferences() -> Map<String, Value> {
@@ -833,6 +1051,43 @@ pub(crate) fn default_preferences() -> Map<String, Value> {
     );
     m.insert("reduced_motion".to_string(), Value::Bool(false));
     m.insert("hit_min_duration".to_string(), Value::from(2));
+    // Audio recording is opt-in: it needs a working input device, a macOS
+    // permission, and disk the user may not want to spend. Transcription is on
+    // by default so a user who installs whisper-cli gets transcripts without
+    // hunting for a switch; a missing engine fails the job with an actionable
+    // error instead of silently doing nothing.
+    m.insert("audio_recording_enabled".to_string(), Value::Bool(false));
+    m.insert(
+        "audio_input_device".to_string(),
+        Value::String(String::new()),
+    );
+    m.insert("audio_pre_roll_ms".to_string(), Value::from(500));
+    m.insert("audio_post_roll_ms".to_string(), Value::from(750));
+    m.insert("audio_min_duration_ms".to_string(), Value::from(500));
+    m.insert(
+        "audio_storage_dir".to_string(),
+        Value::String(String::new()),
+    );
+    m.insert("audio_retention_days".to_string(), Value::from(30));
+    m.insert("transcription_enabled".to_string(), Value::Bool(true));
+    m.insert(
+        "transcription_binary".to_string(),
+        Value::String(String::new()),
+    );
+    m.insert(
+        "transcription_model".to_string(),
+        Value::String(String::new()),
+    );
+    m.insert(
+        "transcription_language".to_string(),
+        Value::String("en".to_string()),
+    );
+    m.insert(
+        "transcription_vocabulary".to_string(),
+        Value::String(crate::transcription::DEFAULT_VOCABULARY.to_string()),
+    );
+    m.insert("transcription_threads".to_string(), Value::from(4));
+    m.insert("transcription_timeout_secs".to_string(), Value::from(300));
     // #273: gates the automatic update check the desktop shell runs at
     // launch. Defaults on — an existing install with no stored value keeps
     // the behaviour it shipped with — but the app is offline-first, so a
@@ -950,25 +1205,45 @@ pub(crate) fn is_hit(live: &LiveState) -> bool {
 pub(crate) fn track_analytics_transition(state: &AppState, live: &LiveState, prev_hit: bool) {
     let hit = is_hit(live);
     if hit && !prev_hit {
-        let mut active = state.active_hit.lock().unwrap();
-        *active = Some(ActiveHit {
-            timestamp: live.timestamp,
-            frequency: live.frequency,
-            channel: live.channel,
-            alpha_tag: live.alpha_tag.clone(),
-            rssi: live.rssi,
-            modulation: live.modulation.clone(),
-            mode: live.mode,
-            bank: None,
-        });
+        // The uid is allocated at OPEN, not at close. The recorder needs a name
+        // for the file before the hit row exists, and joining the two later by
+        // timestamp would be guesswork.
+        let hit_uid = new_hit_uid(state);
+        // Derived from the connected model's bank width, never a constant: 50
+        // on the BC125AT family, 30 on a BC75XLT. The wire carries no bank
+        // field, so this is the same derivation `channels_with_banks` uses.
+        // Read before taking `active_hit` so the two locks are never nested.
+        let bank = live
+            .channel
+            .map(|channel| state.capabilities().index_to_bank(channel));
+        {
+            let mut active = state.active_hit.lock().unwrap();
+            *active = Some(ActiveHit {
+                hit_uid: hit_uid.clone(),
+                timestamp: live.timestamp,
+                frequency: live.frequency,
+                channel: live.channel,
+                alpha_tag: live.alpha_tag.clone(),
+                rssi: live.rssi,
+                modulation: live.modulation.clone(),
+                mode: live.mode,
+                bank,
+            });
+        }
+        state.recordings.hit_open(&hit_uid);
         return;
     }
 
     if !hit && prev_hit {
-        let mut active = state.active_hit.lock().unwrap();
-        if let Some(open_hit) = active.take() {
+        let open_hit = {
+            let mut active = state.active_hit.lock().unwrap();
+            active.take()
+        };
+        if let Some(open_hit) = open_hit {
             let duration = (live.timestamp - open_hit.timestamp).max(0.0);
-            if duration >= min_hit_duration(state) {
+            let hit_uid = open_hit.hit_uid.clone();
+            let row_persisted = duration >= min_hit_duration(state);
+            if row_persisted {
                 let id = state.next_hit_id.fetch_add(1, Ordering::Relaxed) + 1;
                 let entry = ActivityHit {
                     id: id.to_string(),
@@ -988,14 +1263,40 @@ pub(crate) fn track_analytics_transition(state: &AppState, live: &LiveState, pre
                     // ends the hit), and reading here keeps the one source of
                     // truth -- DeviceInfo -- as the only place a model lives.
                     scanner_id: state.device.read().ok().and_then(|d| d.model.clone()),
+                    hit_uid: Some(hit_uid.clone()),
+                    // Queried BEFORE `hit_close` clears the active uid. A row
+                    // that starts life as `recording` is guaranteed to get a
+                    // worker update; `none` means no file is coming.
+                    recording_status: state.recordings.initial_status(&hit_uid).to_string(),
+                    transcript_status: "none".to_string(),
+                    ..Default::default()
                 };
                 {
                     state.analytics_log.lock().unwrap().push(entry.clone());
                 }
+                // Insert BEFORE telling the recorder the hit closed: the
+                // worker's UPDATE must find this row, and its retry window is
+                // short by design.
                 insert_analytics_hit(&state.analytics_db_path, &entry);
             }
+            // Tell the recorder whether a row exists. A segment that finished
+            // early (device loss, recording disabled mid-hit) is applied here,
+            // or its file is deleted when the hit is below the activity
+            // minimum and no row will ever exist.
+            state.recordings.hit_closed(&hit_uid, row_persisted);
+            state.recordings.hit_close();
         }
     }
+}
+
+/// A process-unique, restart-safe id for one hit.
+///
+/// Milliseconds plus a counter: the timestamp keeps two runs from colliding,
+/// the counter keeps two hits in the same millisecond apart. It is also a
+/// legal file stem, which is why the recorder can use it directly.
+pub(crate) fn new_hit_uid(state: &AppState) -> String {
+    let counter = state.next_hit_uid.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{:x}", (epoch_now() * 1000.0) as u64, counter)
 }
 
 pub(crate) fn min_hit_duration(state: &AppState) -> f64 {
@@ -1175,7 +1476,7 @@ pub(crate) fn reset_preferences_db(path: &str) -> Result<(), PreferencePersisten
 
 /// Returns whether an EXISTING database was upgraded. See
 /// `init_preferences_db` for why a fresh install must answer `false`.
-fn init_analytics_db(path: &str) -> Result<bool, MigrationError> {
+pub(crate) fn init_analytics_db(path: &str) -> Result<bool, MigrationError> {
     match open_sqlite(path) {
         Some(conn) => {
             let before = schema_version(&conn);
@@ -1219,8 +1520,7 @@ fn load_analytics_hits_from_db(path: &str) -> Vec<ActivityHit> {
         // before Bearpaw tracked this", so they get their own allowance rather
         // than competing with an identified scanner.
         if let Ok(mut stmt) = conn.prepare(
-            "SELECT id, timestamp, frequency, channel, alpha_tag, modulation, rssi, duration, mode, bank, session_id, ended_at, scanner_id
-             FROM (
+            "SELECT * FROM (
                  SELECT *, ROW_NUMBER() OVER (
                      PARTITION BY scanner_id ORDER BY timestamp DESC
                  ) AS rn
@@ -1228,36 +1528,10 @@ fn load_analytics_hits_from_db(path: &str) -> Vec<ActivityHit> {
              )
              WHERE rn <= ?1",
         ) {
-            let rows = stmt.query_map([ANALYTICS_HIT_LOAD_CAP as i64], |row| {
-                let id: i64 = row.get(0)?;
-                let timestamp: f64 = row.get(1)?;
-                let frequency: f64 = row.get(2)?;
-                let channel: Option<u16> = row.get(3)?;
-                let alpha_tag: Option<String> = row.get(4)?;
-                let modulation: String = row.get(5)?;
-                let rssi: i64 = row.get(6)?;
-                let duration: Option<f64> = row.get(7)?;
-                let mode: String = row.get(8)?;
-                let bank: Option<u8> = row.get(9)?;
-                let session_id: String = row.get(10)?;
-                let ended_at: Option<f64> = row.get(11)?;
-                let scanner_id: Option<String> = row.get(12)?;
-                Ok(ActivityHit {
-                    id: id.to_string(),
-                    timestamp,
-                    frequency,
-                    channel,
-                    alpha_tag,
-                    rssi: rssi as u8,
-                    duration: duration.unwrap_or(0.0),
-                    modulation,
-                    mode: ScannerMode::from_str(&mode),
-                    bank,
-                    session_id,
-                    ended_at: ended_at.unwrap_or(timestamp),
-                    scanner_id,
-                })
-            });
+            // Column mapping lives in `hit_store::row_to_hit` so the load path,
+            // the detail endpoint and search cannot drift apart as columns are
+            // added.
+            let rows = stmt.query_map([ANALYTICS_HIT_LOAD_CAP as i64], hit_store::row_to_hit);
             if let Ok(rows) = rows {
                 out.extend(rows.flatten());
             }
@@ -1291,11 +1565,20 @@ fn load_analytics_hits_from_db(path: &str) -> Vec<ActivityHit> {
     out
 }
 
-fn insert_analytics_hit(path: &str, hit: &ActivityHit) {
+pub(crate) fn insert_analytics_hit(path: &str, hit: &ActivityHit) {
     if let Some(conn) = open_sqlite(path) {
+        // Every media field is written, not just the hot-path ones. This is
+        // also the insert used to restore a row with its audio, and a partial
+        // insert would make a restored hit look like it never had a file.
         let _ = conn.execute(
-            "INSERT INTO scan_hits (timestamp, frequency, channel, alpha_tag, modulation, rssi, duration, mode, bank, session_id, ended_at, scanner_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO scan_hits (timestamp, frequency, channel, alpha_tag, modulation, rssi, \
+             duration, mode, bank, session_id, ended_at, scanner_id, hit_uid, \
+             recording_path, recording_status, link_confidence, recording_duration, \
+             recording_bytes, recording_error, transcript, transcript_original, \
+             transcript_status, transcript_engine, transcript_error, transcript_attempts, \
+             updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
+             ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
             rusqlite::params![
                 hit.timestamp,
                 hit.frequency,
@@ -1308,7 +1591,21 @@ fn insert_analytics_hit(path: &str, hit: &ActivityHit) {
                 hit.bank,
                 hit.session_id,
                 hit.ended_at,
-                hit.scanner_id
+                hit.scanner_id,
+                hit.hit_uid,
+                hit.recording_file,
+                hit.recording_status,
+                hit.link_confidence,
+                hit.recording_duration,
+                hit.recording_bytes,
+                hit.recording_error,
+                hit.transcript,
+                hit.transcript_original,
+                hit.transcript_status,
+                hit.transcript_engine,
+                hit.transcript_error,
+                hit.transcript_attempts,
+                epoch_now()
             ],
         );
     }
@@ -1354,8 +1651,24 @@ pub(crate) fn delete_analytics_hits_for_model(path: &str, model: &str) -> usize 
 ///
 /// Files land under one PID-scoped directory so a run's leftovers are
 /// identifiable; the OS temp cleaner reclaims them. See #410.
+/// A fresh directory per test state.
+///
+/// `default_data_dir()` has one test-wide answer, so every `default_state()`
+/// would otherwise share a recordings root. Two tests writing `h-1.wav` would
+/// then delete each other's files, which reads as a flaky audio bug.
 #[cfg(test)]
-fn unique_test_db_path(default_file: &str) -> String {
+pub(crate) fn unique_test_dir(prefix: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir =
+        std::env::temp_dir().join(format!("bearpaw-test-{prefix}-{}-{n}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+#[cfg(test)]
+pub(crate) fn unique_test_db_path(default_file: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -1813,6 +2126,40 @@ fn migrate_analytics_db(path: &str, conn: &rusqlite::Connection) -> Result<(), M
             "
             ALTER TABLE scan_hits ADD COLUMN scanner_id TEXT;
             CREATE INDEX IF NOT EXISTS idx_hits_scanner ON scan_hits(scanner_id);
+            ",
+        )?;
+    }
+    if current < 3 {
+        // Audio and transcript columns (#audio-recordings). Kept on the same
+        // row as the hit rather than a side table: a recording without its hit
+        // is meaningless, and a join on every Recent Hits row would be a
+        // needless second lookup.
+        //
+        // `hit_uid` is nullable by design. Rows recorded before this migration
+        // have no uid; the API exposes their history and offers no recording
+        // actions rather than inventing ids. SQLite allows many NULLs in a
+        // UNIQUE index, which is exactly the shape wanted here.
+        run_migration_step(
+            conn,
+            3,
+            "
+            ALTER TABLE scan_hits ADD COLUMN hit_uid TEXT;
+            ALTER TABLE scan_hits ADD COLUMN recording_path TEXT;
+            ALTER TABLE scan_hits ADD COLUMN recording_status TEXT;
+            ALTER TABLE scan_hits ADD COLUMN link_confidence TEXT;
+            ALTER TABLE scan_hits ADD COLUMN recording_duration REAL;
+            ALTER TABLE scan_hits ADD COLUMN recording_bytes INTEGER;
+            ALTER TABLE scan_hits ADD COLUMN recording_error TEXT;
+            ALTER TABLE scan_hits ADD COLUMN transcript TEXT;
+            ALTER TABLE scan_hits ADD COLUMN transcript_original TEXT;
+            ALTER TABLE scan_hits ADD COLUMN transcript_status TEXT;
+            ALTER TABLE scan_hits ADD COLUMN transcript_engine TEXT;
+            ALTER TABLE scan_hits ADD COLUMN transcript_error TEXT;
+            ALTER TABLE scan_hits ADD COLUMN transcript_attempts INTEGER DEFAULT 0;
+            ALTER TABLE scan_hits ADD COLUMN updated_at REAL;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_hits_hit_uid ON scan_hits(hit_uid);
+            CREATE INDEX IF NOT EXISTS idx_hits_recording ON scan_hits(recording_status);
+            CREATE INDEX IF NOT EXISTS idx_hits_transcript ON scan_hits(transcript_status);
             ",
         )?;
     }
@@ -4546,6 +4893,84 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// The hit lifecycle allocates a durable uid at OPEN, carries it to the
+    /// row at close, and is honest that no recording is coming when recording
+    /// is disabled.
+    #[test]
+    fn a_hit_allocates_a_durable_uid_at_open() {
+        let state = default_state();
+        let mut live = LiveState {
+            timestamp: 100.0,
+            frequency: 160.725,
+            squelch_open: true,
+            squelch_level: 3,
+            channel: Some(12),
+            alpha_tag: Some("NORFOLK SOUTHERN".to_string()),
+            mode: ScannerMode::Scan,
+            ..Default::default()
+        };
+        track_analytics_transition(&state, &live, false);
+        let active = state
+            .active_hit
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("an active hit");
+        let uid = active.hit_uid.clone();
+        assert!(!uid.is_empty());
+        // Channel 12 is in bank 1 on a 50-channel bank width. The wire carries
+        // no bank, so this is the derivation the detail view and the CSV export
+        // both rely on.
+        assert_eq!(active.bank, Some(1));
+
+        live.timestamp = 105.0;
+        live.squelch_open = false;
+        track_analytics_transition(&state, &live, true);
+
+        let log = state.analytics_log.lock().unwrap();
+        let hit = log.last().expect("a closed hit");
+        assert_eq!(hit.hit_uid.as_deref(), Some(uid.as_str()));
+        assert_eq!(
+            hit.recording_status, "none",
+            "recording is off by default, so the row must not promise audio"
+        );
+        assert_eq!(hit.transcript_status, "none");
+    }
+
+    /// Saving an audio/transcription preference must reach the running
+    /// services. Before this, the settings snapshot was taken once at launch:
+    /// the UI showed a saved model and the worker kept using the old one.
+    #[test]
+    fn media_preferences_reach_the_live_services() {
+        let state = default_state();
+        {
+            let mut prefs = state.preferences.lock().unwrap();
+            prefs.insert("audio_pre_roll_ms".to_string(), json!(900));
+            prefs.insert("transcription_enabled".to_string(), json!(false));
+            prefs.insert(
+                "transcription_model".to_string(),
+                json!("ggml-small.en.bin"),
+            );
+        }
+        state.apply_media_preferences();
+
+        assert_eq!(
+            state.recordings.settings().pre_roll,
+            Duration::from_millis(900)
+        );
+        let transcription = state.transcription.settings();
+        assert!(!transcription.enabled);
+        assert_eq!(transcription.model, "ggml-small.en.bin");
+    }
+
+    #[test]
+    fn two_hits_never_share_a_uid() {
+        let state = default_state();
+        let first = new_hit_uid(&state);
+        let second = new_hit_uid(&state);
+        assert_ne!(first, second);
+    }
+
     /// A v1 database carrying real hits must reach v2 with every row intact.
     ///
     /// Migrations are forward-only (#418), so a step that drops rows on the way
@@ -4561,11 +4986,70 @@ mod tests {
         let version: i32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("read user_version");
-        assert_eq!(version, 2, "the step must bump the version");
+        assert_eq!(
+            version, ANALYTICS_SCHEMA_VERSION,
+            "the step must bump the version"
+        );
         let rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM scan_hits", [], |row| row.get(0))
             .expect("count rows");
         assert_eq!(rows, 2, "no hit may be lost on the way to v2");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The recording columns arrive on an existing database, and old hits keep
+    /// every field they had. Existing rows get a NULL `hit_uid`: they were
+    /// recorded before there was anything to join a file to, and inventing one
+    /// would offer the UI a recording that does not exist.
+    #[test]
+    fn analytics_v2_upgrades_to_v3_with_media_columns_and_intact_hits() {
+        let path = temp_db_file("analytics-v2-to-v3");
+        seed_v1_analytics_db(&path, &[(146.7, Some("KC FIRE 1"))]);
+        {
+            let conn = rusqlite::Connection::open(&path).expect("reopen");
+            conn.execute("ALTER TABLE scan_hits ADD COLUMN scanner_id TEXT", [])
+                .expect("v2 column");
+            conn.pragma_update(None, "user_version", 2)
+                .expect("v2 version");
+        }
+
+        init_analytics_db(path.to_str().expect("path to string")).expect("migrate");
+
+        let conn = rusqlite::Connection::open(&path).expect("reopen");
+        let version: i32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("read user_version");
+        assert_eq!(version, ANALYTICS_SCHEMA_VERSION);
+
+        let columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(scan_hits)")
+            .expect("table info")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("rows")
+            .flatten()
+            .collect();
+        for column in [
+            "hit_uid",
+            "recording_path",
+            "recording_status",
+            "transcript",
+            "transcript_status",
+            "transcript_original",
+            "updated_at",
+        ] {
+            assert!(columns.iter().any(|c| c == column), "missing {column}");
+        }
+
+        let (tag, uid, status): (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT alpha_tag, hit_uid, recording_status FROM scan_hits",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("row");
+        assert_eq!(tag.as_deref(), Some("KC FIRE 1"));
+        assert!(uid.is_none(), "old hits must not be given a fake uid");
+        assert!(status.is_none(), "old hits have no recording state");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -4644,6 +5128,7 @@ mod tests {
             session_id: "s".to_string(),
             ended_at: 105.0,
             scanner_id: Some("BC75XLT".to_string()),
+            ..Default::default()
         };
         insert_analytics_hit(&p, &hit);
 
@@ -4687,6 +5172,7 @@ mod tests {
             session_id: "s".to_string(),
             ended_at: ts + 1.0,
             scanner_id: Some(scanner.to_string()),
+            ..Default::default()
         };
 
         // The quiet scanner recorded FIRST, so every one of its hits is older
