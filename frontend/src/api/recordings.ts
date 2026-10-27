@@ -1,5 +1,11 @@
 import { API_BASE } from './useApi';
-import type { AudioDevicesResponse, HitDetail, HitPage, RecordingStatusSnapshot } from '../types';
+import type {
+  AudioDevicesResponse,
+  HitDetail,
+  HitPage,
+  RecordingStatusSnapshot,
+  RecordingsSummary,
+} from '../types';
 
 /**
  * REST calls for recordings, transcripts and searchable history.
@@ -84,6 +90,17 @@ export function getAudioDevices(): Promise<AudioDevicesResponse> {
 
 export function getAudioStatus(): Promise<RecordingStatusSnapshot> {
   return request<RecordingStatusSnapshot>('/audio/status');
+}
+
+/**
+ * Library totals for the history header.
+ *
+ * Deliberately not part of `/audio/status`: the settings sheet polls that one
+ * for the level meter, and this is a database aggregate rather than a snapshot
+ * of live capture.
+ */
+export function getRecordingsSummary(): Promise<RecordingsSummary> {
+  return request<RecordingsSummary>('/recordings/summary');
 }
 
 export function testAudioRecording(seconds = 3): Promise<{ file: string; duration_secs: number }> {

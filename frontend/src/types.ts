@@ -416,6 +416,15 @@ export interface RecordingStatusSnapshot {
   capture: CaptureStatusSnapshot;
 }
 
+/** Size and age of the recording library, for the history header. */
+export interface RecordingsSummary {
+  count: number;
+  bytes: number;
+  oldest_timestamp: number | null;
+  failed_transcripts: number;
+  retention_days: number;
+}
+
 export interface WhisperModelInfo {
   name: string;
   path: string;
