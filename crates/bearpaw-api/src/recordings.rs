@@ -1386,8 +1386,8 @@ mod tests {
 
         for uid in ["h-a", "h-b"] {
             let hit = hit_store::get_hit(&db, uid).expect("row");
-            assert_eq!(hit.recording_status, "ready", "{uid}");
-            assert!(root.join(format!("{uid}.wav")).is_file(), "{uid}");
+            assert_eq!(hit.recording_status, "ready");
+            assert!(root.join(format!("{uid}.wav")).is_file());
         }
     }
 

@@ -491,7 +491,9 @@ pub fn record_test_clip(device: Option<&str>, seconds: f64, path: &Path) -> Resu
         .map_err(|e| format!("audio_stream_play_failed: {e}"))?;
 
     let wanted = (seconds.clamp(0.25, 30.0) * f64::from(RECORDING_SAMPLE_RATE)) as usize;
-    let mut collected: Vec<f32> = Vec::with_capacity(wanted);
+    // Reserve a fixed upper bound rather than sizing an allocation from an
+    // HTTP parameter. The sample target remains clamped to at most 30 seconds.
+    let mut collected: Vec<f32> = Vec::with_capacity(30 * RECORDING_SAMPLE_RATE as usize);
     let started = Instant::now();
     let deadline = started + Duration::from_secs_f64(seconds.clamp(0.25, 30.0) + 2.0);
     let mut reason = "deadline";
