@@ -131,6 +131,21 @@ pub(crate) fn mark_recording_deleted(db_path: &str, hit_uid: &str) -> Option<Str
     previous
 }
 
+/// Remove machine-generated text after an empty result, while keeping a
+/// correction the user typed. Used when a retranscription finds no speech: a
+/// stale `[APPLAUSE]` marker beside a `failed` status is worse than no text.
+pub(crate) fn clear_machine_transcript(db_path: &str, hit_uid: &str) {
+    let Some(conn) = open_sqlite(db_path) else {
+        return;
+    };
+    let _ = conn.execute(
+        "UPDATE scan_hits SET transcript = NULL, transcript_original = NULL, updated_at = ?2 \
+         WHERE hit_uid = ?1 \
+         AND (transcript_original IS NULL OR transcript = transcript_original)",
+        params![hit_uid, super::epoch_now()],
+    );
+}
+
 pub(crate) fn clear_transcript(db_path: &str, hit_uid: &str) {
     let Some(conn) = open_sqlite(db_path) else {
         return;
@@ -706,6 +721,23 @@ mod tests {
         // The stored original equals the displayed text, so the API hides it:
         // "Machine transcript" is only interesting when it differs.
         assert!(row.transcript_original.is_none());
+    }
+
+    #[test]
+    fn an_empty_result_clears_machine_text_but_keeps_a_correction() {
+        let (db, _root) = seed();
+        set_transcript_completed(&db, "h-1", "[APPLAUSE]", "whisper-cli");
+        clear_machine_transcript(&db, "h-1");
+        let row = get_hit(&db, "h-1").unwrap();
+        assert!(row.transcript.is_none());
+        assert!(row.transcript_original.is_none());
+
+        set_transcript_completed(&db, "h-1", "machine", "whisper-cli");
+        edit_transcript(&db, "h-1", "human correction");
+        clear_machine_transcript(&db, "h-1");
+        let row = get_hit(&db, "h-1").unwrap();
+        assert_eq!(row.transcript.as_deref(), Some("human correction"));
+        assert_eq!(row.transcript_original.as_deref(), Some("machine"));
     }
 
     #[test]

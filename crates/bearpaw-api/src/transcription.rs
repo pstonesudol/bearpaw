@@ -740,7 +740,12 @@ fn run_job(
                 );
             }
         }
-        Err(error) => fail(db_path, ws_tx, hit_uid, &error, true),
+        Err(error) => {
+            if matches!(error, TranscriptionError::EmptyTranscript) {
+                hit_store::clear_machine_transcript(db_path, hit_uid);
+            }
+            fail(db_path, ws_tx, hit_uid, &error, true);
+        }
     }
 }
 
