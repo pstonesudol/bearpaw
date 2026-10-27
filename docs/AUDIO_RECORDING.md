@@ -6,13 +6,19 @@ feature cannot do.
 
 > **Status (2026-10-26):** verified on a real BC125AT over direct USB and a
 > Cubilux HLMS-C4 (`Line IN`) on an Apple Silicon Mac: device discovery, live
-> input level, a real squelch hit producing a linked WAV, playback through the
-> app, whisper-cli transcription of a known speech clip through the running
-> service, and persistence across a backend restart. **Not yet verified:** a
-> live voice transmission (the monitored NS channels were carrying data/weak
-> carriers during the session), adapter/scanner unplug mid-hit, and retention
-> expiry. Everything in [Hardware test plan](#hardware-test-plan) that is not
-> listed above is still unexecuted.
+> input level, real squelch hits producing linked WAVs, playback through the
+> app, live SEPTA NORTH voice traffic transcribed locally, transcript
+> correction with the machine text preserved, search, and persistence across a
+> backend restart. **Not yet verified:** adapter/scanner unplug mid-hit,
+> retention expiry, and a long-session CPU/memory measurement. Everything in
+> [Hardware test plan](#hardware-test-plan) that is not listed above is still
+> unexecuted.
+>
+> The session also found four defects the fake-engine tests could not: whisper's
+> output path was computed wrongly (every job looked empty), Test recording
+> resampled twice (10 s request → 4 s), non-speech markers such as `[APPLAUSE]`
+> were stored as transcripts, and a later empty result left the old marker
+> beside a `failed` status. All four are fixed and pinned by regression tests.
 
 ## Why it is built this way
 
