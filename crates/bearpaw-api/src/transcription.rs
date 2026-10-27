@@ -391,16 +391,12 @@ impl TranscriptionEngine for WhisperCliEngine {
             .map(|t| t.trim().to_string())
             .unwrap_or_default();
         cleanup(&text_path, &log_path);
-        // whisper marks non-speech with a bracketed tag rather than an empty
-        // file. Storing "[BLANK_AUDIO]" as a transcript would present noise as
-        // a result.
-        let lower = text.to_lowercase();
-        if text.is_empty()
-            || lower == "[blank_audio]"
-            || lower == "[silence]"
-            || lower == "(silence)"
-            || lower == "[music]"
-        {
+        // whisper marks non-speech with a single bracketed or parenthesised
+        // tag (`[BLANK_AUDIO]`, `[APPLAUSE]`, `(train horn)`) rather than an
+        // empty file. Storing that as a transcript presents noise as a result.
+        let is_marker = (text.starts_with('[') && text.ends_with(']'))
+            || (text.starts_with('(') && text.ends_with(')'));
+        if text.is_empty() || is_marker {
             return Err(TranscriptionError::EmptyTranscript);
         }
         Ok(text)
@@ -897,24 +893,31 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_blank_audio_marker_is_an_empty_transcript_not_text() {
-        let dir = std::env::temp_dir().join(format!(
-            "bearpaw-whisper-cli-{}-{}",
-            std::process::id(),
-            crate::api::uuid_simple()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let script = script_engine(
-            &dir,
-            "while [ $# -gt 0 ]; do\n  if [ \"$1\" = \"--output-file\" ]; then out=\"$2\"; fi\n  shift\ndone\nprintf '[BLANK_AUDIO]' > \"$out.txt\"",
-        );
-        let request = engine_request(&dir);
-        let engine = WhisperCliEngine::new(script);
-        assert!(matches!(
-            engine.transcribe(&request),
-            Err(TranscriptionError::EmptyTranscript)
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
+    fn a_bracketed_non_speech_marker_is_an_empty_transcript_not_text() {
+        for marker in ["[BLANK_AUDIO]", "[APPLAUSE]", "(train horn)"] {
+            let dir = std::env::temp_dir().join(format!(
+                "bearpaw-whisper-cli-{}-{}",
+                std::process::id(),
+                crate::api::uuid_simple()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let script = script_engine(
+                &dir,
+                &format!(
+                    "while [ $# -gt 0 ]; do\n  if [ \"$1\" = \"--output-file\" ]; then out=\"$2\"; fi\n  shift\ndone\nprintf '%s' '{marker}' > \"$out.txt\""
+                ),
+            );
+            let request = engine_request(&dir);
+            let engine = WhisperCliEngine::new(script);
+            assert!(
+                matches!(
+                    engine.transcribe(&request),
+                    Err(TranscriptionError::EmptyTranscript)
+                ),
+                "{marker} must not become a transcript"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]
