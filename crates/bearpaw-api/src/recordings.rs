@@ -708,22 +708,19 @@ impl RecordingSink {
                         }
                     }
                 };
-                match disposition {
-                    Some(row_persisted) => {
-                        self.resolve_deferred(
-                            SegmentOutcome::Finalized {
-                                hit_uid,
-                                file_name,
-                                duration_secs,
-                                bytes,
-                                status,
-                                confidence,
-                                error,
-                            },
-                            row_persisted,
-                        );
-                    }
-                    None => {}
+                if let Some(row_persisted) = disposition {
+                    self.resolve_deferred(
+                        SegmentOutcome::Finalized {
+                            hit_uid,
+                            file_name,
+                            duration_secs,
+                            bytes,
+                            status,
+                            confidence,
+                            error,
+                        },
+                        row_persisted,
+                    );
                 }
             }
             SegmentOutcome::Discarded {

@@ -27,7 +27,9 @@ fn is_media_preference(key: &str) -> bool {
 /// the settings sheet re-reads `/audio/devices` for the resulting state.
 fn apply_media_preferences(state: &AppState) {
     let state = state.clone();
-    let _ = tokio::task::spawn_blocking(move || state.apply_media_preferences());
+    drop(tokio::task::spawn_blocking(move || {
+        state.apply_media_preferences()
+    }));
 }
 
 pub(crate) async fn get_preferences(State(state): State<AppState>) -> Json<Value> {

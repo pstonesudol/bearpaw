@@ -74,6 +74,10 @@ pub(crate) fn row_to_hit(row: &Row<'_>) -> rusqlite::Result<ActivityHit> {
 /// Returns `false` when no row matched, which means the hit was below the
 /// activity minimum or the database is unavailable. The caller must then delete
 /// the file: an audio file with no row is an orphan by definition.
+///
+/// Flat arguments rather than a struct: this is one UPDATE with eight fields
+/// and every caller already has them as locals.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn set_recording_outcome(
     db_path: &str,
     hit_uid: &str,

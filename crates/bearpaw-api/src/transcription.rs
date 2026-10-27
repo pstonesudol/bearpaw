@@ -316,8 +316,12 @@ impl TranscriptionEngine for WhisperCliEngine {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "hit".to_string());
         let work_base = request.audio.with_file_name(format!(".{stem}.whisper"));
-        let text_path = work_base.with_extension("txt");
-        let log_path = work_base.with_extension("log");
+        // whisper appends `.txt` to the `--output-file` base; it does not
+        // replace the base's extension. `with_extension("txt")` therefore
+        // looked for `.stem.txt` while whisper wrote `.stem.whisper.txt`, and
+        // every job reported an empty transcript.
+        let text_path = PathBuf::from(format!("{}.txt", work_base.display()));
+        let log_path = PathBuf::from(format!("{}.log", work_base.display()));
         let _ = std::fs::remove_file(&text_path);
         let _ = std::fs::remove_file(&log_path);
 
@@ -387,7 +391,16 @@ impl TranscriptionEngine for WhisperCliEngine {
             .map(|t| t.trim().to_string())
             .unwrap_or_default();
         cleanup(&text_path, &log_path);
-        if text.is_empty() {
+        // whisper marks non-speech with a bracketed tag rather than an empty
+        // file. Storing "[BLANK_AUDIO]" as a transcript would present noise as
+        // a result.
+        let lower = text.to_lowercase();
+        if text.is_empty()
+            || lower == "[blank_audio]"
+            || lower == "[silence]"
+            || lower == "(silence)"
+            || lower == "[music]"
+        {
             return Err(TranscriptionError::EmptyTranscript);
         }
         Ok(text)
@@ -822,6 +835,86 @@ mod tests {
             timeout: Duration::from_secs(1),
         });
         assert!(matches!(result, Err(TranscriptionError::AudioMissing(_))));
+    }
+
+    /// REGRESSION GUARD: whisper appends `.txt` to the `--output-file` base.
+    ///
+    /// The first implementation used `with_extension("txt")` on a base ending
+    /// in `.whisper`, so it looked for `.hit.txt` while whisper wrote
+    /// `.hit.whisper.txt`. Every real transcription failed as "empty" while
+    /// every test passed, because the tests used a fake engine and never
+    /// exercised this path. Found on hardware, 2026-10-26.
+    #[cfg(unix)]
+    fn script_engine(dir: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("fake-whisper");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        script
+    }
+
+    #[cfg(unix)]
+    fn engine_request(dir: &Path) -> TranscriptionRequest {
+        let audio = dir.join("hit.wav");
+        let model = dir.join("model.bin");
+        std::fs::write(&audio, b"RIFF").unwrap();
+        std::fs::write(&model, b"model").unwrap();
+        TranscriptionRequest {
+            audio,
+            model,
+            language: "en".into(),
+            vocabulary: "SEPTA, Norfolk Southern".into(),
+            threads: 1,
+            timeout: Duration::from_secs(5),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_engine_reads_the_text_file_whisper_actually_writes() {
+        let dir = std::env::temp_dir().join(format!(
+            "bearpaw-whisper-cli-{}-{}",
+            std::process::id(),
+            crate::api::uuid_simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = script_engine(
+            &dir,
+            "while [ $# -gt 0 ]; do\n  if [ \"$1\" = \"--output-file\" ]; then out=\"$2\"; fi\n  shift\ndone\nprintf 'Norfolk Southern 24 clear' > \"$out.txt\"",
+        );
+        let request = engine_request(&dir);
+        let engine = WhisperCliEngine::new(script);
+        let text = engine.transcribe(&request).expect("the transcript");
+        assert_eq!(text, "Norfolk Southern 24 clear");
+        assert!(
+            !dir.join(".hit.whisper.txt").exists(),
+            "the output file must be cleaned up"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_blank_audio_marker_is_an_empty_transcript_not_text() {
+        let dir = std::env::temp_dir().join(format!(
+            "bearpaw-whisper-cli-{}-{}",
+            std::process::id(),
+            crate::api::uuid_simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = script_engine(
+            &dir,
+            "while [ $# -gt 0 ]; do\n  if [ \"$1\" = \"--output-file\" ]; then out=\"$2\"; fi\n  shift\ndone\nprintf '[BLANK_AUDIO]' > \"$out.txt\"",
+        );
+        let request = engine_request(&dir);
+        let engine = WhisperCliEngine::new(script);
+        assert!(matches!(
+            engine.transcribe(&request),
+            Err(TranscriptionError::EmptyTranscript)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

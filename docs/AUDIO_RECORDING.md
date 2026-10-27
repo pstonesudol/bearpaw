@@ -4,10 +4,15 @@ Bearpaw can record the audio of every scanner hit and transcribe it locally.
 This document is the design, the setup guide, and the honest list of what the
 feature cannot do.
 
-> **Status:** the capture, storage, transcription and UI code ships together.
-> Nothing in this document has been verified against a BC125AT and a Cubilux
-> adapter yet — see [Hardware test plan](#hardware-test-plan). Everything below
-> that touches real hardware is a plan, not a measurement.
+> **Status (2026-10-26):** verified on a real BC125AT over direct USB and a
+> Cubilux HLMS-C4 (`Line IN`) on an Apple Silicon Mac: device discovery, live
+> input level, a real squelch hit producing a linked WAV, playback through the
+> app, whisper-cli transcription of a known speech clip through the running
+> service, and persistence across a backend restart. **Not yet verified:** a
+> live voice transmission (the monitored NS channels were carrying data/weak
+> carriers during the session), adapter/scanner unplug mid-hit, and retention
+> expiry. Everything in [Hardware test plan](#hardware-test-plan) that is not
+> listed above is still unexecuted.
 
 ## Why it is built this way
 
@@ -236,8 +241,9 @@ plan:
 
 ## Hardware test plan
 
-Not yet executed. Run this on the Mac with the BC125AT and Cubilux attached and
-record the outcome in the PR.
+Partially executed on 2026-10-26; the status box above is the record. Run the
+rest on the Mac with the BC125AT and Cubilux attached and record the outcome in
+the PR.
 
 1. **Device discovery** — adapter appears in the settings selector with its
    CoreAudio name; selecting it persists across a restart.

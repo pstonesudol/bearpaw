@@ -468,15 +468,16 @@ pub fn record_test_clip(device: Option<&str>, seconds: f64, path: &Path) -> Resu
     let config: StreamConfig = supported.config();
 
     let (tx, rx) = std::sync::mpsc::channel::<Vec<f32>>();
-    let mut resampler = LinearResampler::new(
-        f64::from(config.sample_rate.0),
-        f64::from(RECORDING_SAMPLE_RATE),
-    );
+    // `build_stream` already downmixes AND resamples to 16 kHz. Resampling
+    // again here divided the clip by the device-to-16k ratio a second time:
+    // a 10 s request returned 4 s at 48 kHz, and the audio played slow.
     let sink_tx = tx.clone();
     let sink = move |samples: Vec<f32>| {
         let _ = sink_tx.send(samples);
     };
-    let on_error = |_message: String| {};
+    let on_error = |message: String| {
+        tracing::warn!(error = %message, "test recording stream error");
+    };
     let stream = match supported.sample_format() {
         SampleFormat::F32 => build_stream::<f32>(&device, &config, sink, on_error),
         SampleFormat::I16 => build_stream::<i16>(&device, &config, sink, on_error),
@@ -491,7 +492,9 @@ pub fn record_test_clip(device: Option<&str>, seconds: f64, path: &Path) -> Resu
 
     let wanted = (seconds.clamp(0.25, 30.0) * f64::from(RECORDING_SAMPLE_RATE)) as usize;
     let mut collected: Vec<f32> = Vec::with_capacity(wanted);
-    let deadline = Instant::now() + Duration::from_secs_f64(seconds.clamp(0.25, 30.0) + 2.0);
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs_f64(seconds.clamp(0.25, 30.0) + 2.0);
+    let mut reason = "deadline";
     while collected.len() < wanted {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -499,19 +502,28 @@ pub fn record_test_clip(device: Option<&str>, seconds: f64, path: &Path) -> Resu
         }
         match rx.recv_timeout(remaining.min(Duration::from_millis(500))) {
             Ok(chunk) => {
-                let mut converted = Vec::new();
-                resampler.process(&chunk, &mut converted);
-                collected.extend_from_slice(&converted);
+                collected.extend_from_slice(&chunk);
                 if collected.len() >= wanted {
                     collected.truncate(wanted);
+                    reason = "complete";
                     break;
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                reason = "disconnected";
+                break;
+            }
         }
     }
     drop(stream);
+    tracing::info!(
+        requested = seconds,
+        samples = collected.len(),
+        elapsed = started.elapsed().as_secs_f64(),
+        reason,
+        "test recording finished"
+    );
 
     if collected.is_empty() {
         return Err("audio_test_no_samples: the device produced no audio".to_string());
