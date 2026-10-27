@@ -4,9 +4,10 @@ import userEvent from '@testing-library/user-event';
 import { TabBar } from '../TabBar';
 
 describe('TabBar', () => {
-  it('renders all three tabs', () => {
+  it('renders every view tab', () => {
     render(<TabBar currentTab="Scan" onTabChange={() => {}} />);
     expect(screen.getByRole('tab', { name: 'Scan' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Recordings' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Device' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Channels' })).toBeInTheDocument();
   });
@@ -47,8 +48,8 @@ describe('TabBar', () => {
     render(<TabBar currentTab="Scan" onTabChange={onTabChange} />);
     screen.getByRole('tab', { name: 'Scan' }).focus();
     await userEvent.keyboard('{ArrowRight}');
-    // TABS order is Scan, Channels, Device — so next is Channels.
-    expect(onTabChange).toHaveBeenCalledWith('Channels');
+    // TABS order is Scan, Recordings, Channels, Device — so next is Recordings.
+    expect(onTabChange).toHaveBeenCalledWith('Recordings');
   });
 
   it('Home and End jump to the first and last tab', async () => {

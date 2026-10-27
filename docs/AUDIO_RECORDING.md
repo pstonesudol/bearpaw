@@ -181,6 +181,25 @@ mistaken for a recording.
   close handler reports whether a row was written, so the bytes are never
   deleted and the row is never left claiming `recording`.
 
+## Reviewing recordings
+
+The **Recordings** tab is the full-width library view. It is not a dialog: it
+stays open while the scanner keeps running.
+
+* Rows play in place — one shared player, so listening never opens a sheet. When
+  a clip ends the next playable row starts.
+* The playing row expands into a seek bar plus the transcript actions: retry,
+  correct (inline, machine text preserved), delete.
+* `Group` switches between day, channel and a flat list; `Sort` flips newest
+  and oldest. Both are server-side, so paging stays consistent.
+* Scrolling loads the next page automatically; the footer says how much of the
+  total is loaded.
+* Each row draws a waveform measured from the stored WAV (`GET
+  /hits/{id}/waveform`), and a clipped signal is drawn red with its peak in the
+  player strip. Clipping is the usual reason a transcript comes back empty.
+* Keyboard: `space` play/pause, `J`/`K` move, `T` transcribe, `C` correct,
+  `D` delete (which asks for a second press).
+
 ## Transcription semantics
 
 | Status | Meaning |

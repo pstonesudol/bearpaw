@@ -10,7 +10,6 @@ import { useScannerCapabilities } from '../../../hooks/useScannerCapabilities';
 import type { ActivityLogEntry, RecordingStatus, TranscriptStatus } from '../../../types';
 import { ScannerDisplay, type LockoutKind } from '../ScannerUI';
 import { HitDetailSheet } from './HitDetailSheet';
-import { HitHistorySheet } from './HitHistorySheet';
 import type { ScannerMode } from '../../App';
 
 /** Row order for the heatmap: Monday first, matching `computeLocalHeatmap`. */
@@ -187,6 +186,8 @@ export interface ScanViewProps {
   onVolumeChange: (value: number) => void;
   onBankToggle: (index: number) => void;
   onOpenActivityExport: () => void;
+  /** Switches to the full-width Recordings view. */
+  onOpenRecordings: () => void;
 }
 
 export function ScanView({
@@ -207,6 +208,7 @@ export function ScanView({
   onVolumeChange,
   onBankToggle,
   onOpenActivityExport,
+  onOpenRecordings,
 }: ScanViewProps) {
   const liveState = useStore((state) => state.liveState);
   const fullActivityLog = useStore((state) => state.fullActivityLog);
@@ -228,7 +230,6 @@ export function ScanView({
     () => rollUpHits(fullActivityLog).slice(0, HIT_SLOT_COUNT),
     [fullActivityLog],
   );
-  const [historyOpen, setHistoryOpen] = useState(false);
   const [selectedHit, setSelectedHit] = useState<{
     uid: string;
     entry: ActivityLogEntry | null;
@@ -292,7 +293,7 @@ export function ScanView({
             <div className="flex shrink-0 items-center gap-2">
               <button
                 type="button"
-                onClick={() => setHistoryOpen(true)}
+                onClick={onOpenRecordings}
                 className="inline-flex shrink-0 items-center gap-[clamp(4px,1.2cqmin,16px)] rounded-scanner-xs border border-white/10 bg-white/5 px-[clamp(8px,1.8cqmin,28px)] py-[clamp(4px,1cqmin,16px)] text-[clamp(11px,2.6cqmin,44px)] text-white/80 transition-colors hover:border-white/20 hover:bg-white/10 hover:text-white"
                 aria-label="Search hit history"
               >
@@ -555,14 +556,6 @@ export function ScanView({
         </div>
       </motion.div>
 
-      <HitHistorySheet
-        isOpen={historyOpen}
-        onClose={() => setHistoryOpen(false)}
-        onSelectHit={(id) => {
-          setHistoryOpen(false);
-          setSelectedHit({ uid: id, entry: null });
-        }}
-      />
       <HitDetailSheet
         hitUid={selectedHit?.uid ?? null}
         initial={selectedHit?.entry ?? null}

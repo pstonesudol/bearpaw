@@ -422,7 +422,17 @@ export interface RecordingsSummary {
   bytes: number;
   oldest_timestamp: number | null;
   failed_transcripts: number;
+  untranscribed: number;
+  hits_total: number;
   retention_days: number;
+}
+
+/** Peak shape of one recording, measured from the stored WAV. */
+export interface HitWaveform {
+  /** Peak amplitude per bucket, 0–100. */
+  buckets: number[];
+  peak_dbfs: number;
+  clipped: boolean;
 }
 
 export interface WhisperModelInfo {

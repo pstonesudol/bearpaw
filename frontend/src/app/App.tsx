@@ -24,13 +24,14 @@ import { openExternalUrl } from '../tauri-shell';
 import type { BanksUpdateMessage, LiveState, ProgressMessage, StateUpdateMessage } from '../types';
 import { DeviceTab } from './components/views/DeviceTab';
 import { ChannelsTab } from './components/views/ChannelsTab';
+import { RecordingsView } from './components/views/RecordingsView';
 import { ScanView } from './components/views/ScanView';
 import { useScannerCapabilities } from '../hooks/useScannerCapabilities';
 import { DataDiagnosticBanner } from './components/DataDiagnosticBanner';
 import { TabBar } from './components/TabBar';
 import { ActivityExportSheet } from './components/views/ActivityExportSheet';
 
-export type Tab = 'Scan' | 'Device' | 'Channels';
+export type Tab = 'Scan' | 'Recordings' | 'Device' | 'Channels';
 export type ScannerMode = 'SCAN' | 'HOLD' | 'SEARCH' | 'CLOSE_CALL';
 
 /**
@@ -1251,8 +1252,11 @@ export default function App() {
                 onVolumeChange={handleVolumeChange}
                 onBankToggle={handleBankToggle}
                 onOpenActivityExport={() => setIsExportSheetOpen(true)}
+                onOpenRecordings={() => handleTabChange('Recordings')}
               />
             )}
+
+            {currentTab === 'Recordings' && <RecordingsView />}
 
             {currentTab === 'Device' && (
               <DeviceTab

@@ -15,12 +15,14 @@ export interface MenuEventHandlers {
 
 const NAV_TABS: Record<string, Tab> = {
   'bearpaw:nav:scan': 'Scan',
+  'bearpaw:nav:recordings': 'Recordings',
   'bearpaw:nav:device': 'Device',
   'bearpaw:nav:channels': 'Channels',
 };
 
 const EVENT_NAMES = [
   'bearpaw:nav:scan',
+  'bearpaw:nav:recordings',
   'bearpaw:nav:device',
   'bearpaw:nav:channels',
   'bearpaw:cmd:hold',

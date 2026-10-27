@@ -3,6 +3,7 @@ import type {
   AudioDevicesResponse,
   HitDetail,
   HitPage,
+  HitWaveform,
   RecordingStatusSnapshot,
   RecordingsSummary,
 } from '../types';
@@ -46,6 +47,8 @@ export interface HitQuery {
   has_recording?: boolean;
   recording_status?: string;
   transcript_status?: string;
+  sort?: 'timestamp' | 'frequency' | 'duration' | 'channel';
+  order?: 'asc' | 'desc';
   limit?: number;
   offset?: number;
 }
@@ -108,6 +111,15 @@ export function testAudioRecording(seconds = 3): Promise<{ file: string; duratio
     method: 'POST',
     body: JSON.stringify({ seconds }),
   });
+}
+
+/**
+ * Peak shape of a recording, for the row's waveform.
+ *
+ * Decoded server-side so the list can draw a row without downloading its audio.
+ */
+export function getHitWaveform(id: string, buckets = 64): Promise<HitWaveform> {
+  return request<HitWaveform>(`/hits/${encodeURIComponent(id)}/waveform?buckets=${buckets}`);
 }
 
 /**

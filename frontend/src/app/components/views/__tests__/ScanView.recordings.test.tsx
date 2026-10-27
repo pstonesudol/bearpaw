@@ -50,6 +50,7 @@ const baseProps = {
   onVolumeChange: () => {},
   onBankToggle: () => {},
   onOpenActivityExport: () => {},
+  onOpenRecordings: () => {},
 };
 
 describe('ScanView recordings', () => {
