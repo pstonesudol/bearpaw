@@ -246,6 +246,11 @@ pub(crate) struct HitFilter {
     pub limit: Option<usize>,
     pub offset: Option<usize>,
     pub scanner_id: Option<String>,
+    /// Column to order by: `timestamp` (default), `frequency`, `duration` or
+    /// `channel`.
+    pub sort: Option<String>,
+    /// `asc` or `desc` (default).
+    pub order: Option<String>,
 }
 
 pub(crate) fn list_hits(db_path: &str, filter: &HitFilter) -> (Vec<ActivityHit>, usize) {
@@ -351,8 +356,24 @@ pub(crate) fn list_hits(db_path: &str, filter: &HitFilter) -> (Vec<ActivityHit>,
 
     let limit = filter.limit.unwrap_or(100).clamp(1, 500) as i64;
     let offset = filter.offset.unwrap_or(0) as i64;
+    // Whitelisted, never interpolated from the query string: the column goes
+    // into SQL text, and `sort=timestamp; DROP` must not have a path in.
+    let sort_column = match filter.sort.as_deref() {
+        Some("frequency") => "frequency",
+        Some("duration") => "COALESCE(duration, 0)",
+        Some("channel") => "COALESCE(channel, 0)",
+        _ => "timestamp",
+    };
+    let direction = if matches!(filter.order.as_deref(), Some("asc")) {
+        "ASC"
+    } else {
+        "DESC"
+    };
+    // `id` is the tiebreaker so paging cannot repeat or skip a row that shares
+    // its timestamp with a neighbour (a back-to-back transmission can).
     let sql = format!(
-        "SELECT {HIT_COLUMNS} FROM scan_hits{where_sql} ORDER BY timestamp DESC LIMIT {limit} OFFSET {offset}"
+        "SELECT {HIT_COLUMNS} FROM scan_hits{where_sql} \
+         ORDER BY {sort_column} {direction}, id {direction} LIMIT {limit} OFFSET {offset}"
     );
     let mut stmt = match conn.prepare(&sql) {
         Ok(stmt) => stmt,
@@ -502,32 +523,48 @@ pub(crate) struct RecordingLibrary {
     pub bytes: i64,
     pub oldest_timestamp: Option<f64>,
     pub failed_transcripts: usize,
+    /// Every hit, recorded or not — the "All" chip counts hits, not files.
+    pub hits_total: usize,
+    /// Playable audio whose transcript is missing or still in flight.
+    pub untranscribed: usize,
 }
 
 pub(crate) fn recording_library(db_path: &str) -> RecordingLibrary {
     let Some(conn) = open_sqlite(db_path) else {
         return RecordingLibrary::default();
     };
-    conn.query_row(
-        "SELECT COUNT(*), \
-                COALESCE(SUM(COALESCE(recording_bytes, 0)), 0), \
-                MIN(timestamp), \
-                COALESCE(SUM(CASE WHEN COALESCE(transcript_status, 'none') = 'failed' \
-                                  THEN 1 ELSE 0 END), 0) \
-         FROM scan_hits \
-         WHERE recording_path IS NOT NULL \
-           AND COALESCE(recording_status, 'none') IN ('ready', 'partial')",
-        [],
-        |row| {
-            Ok(RecordingLibrary {
-                count: row.get::<_, i64>(0)? as usize,
-                bytes: row.get::<_, i64>(1)?,
-                oldest_timestamp: row.get::<_, Option<f64>>(2)?,
-                failed_transcripts: row.get::<_, i64>(3)? as usize,
-            })
-        },
-    )
-    .unwrap_or_default()
+    let mut library = conn
+        .query_row(
+            "SELECT COUNT(*), \
+                    COALESCE(SUM(COALESCE(recording_bytes, 0)), 0), \
+                    MIN(timestamp), \
+                    COALESCE(SUM(CASE WHEN COALESCE(transcript_status, 'none') = 'failed' \
+                                      THEN 1 ELSE 0 END), 0), \
+                    COALESCE(SUM(CASE WHEN COALESCE(transcript_status, 'none') \
+                                        IN ('none', 'pending', 'processing') \
+                                      THEN 1 ELSE 0 END), 0) \
+             FROM scan_hits \
+             WHERE recording_path IS NOT NULL \
+               AND COALESCE(recording_status, 'none') IN ('ready', 'partial')",
+            [],
+            |row| {
+                Ok(RecordingLibrary {
+                    count: row.get::<_, i64>(0)? as usize,
+                    bytes: row.get::<_, i64>(1)?,
+                    oldest_timestamp: row.get::<_, Option<f64>>(2)?,
+                    failed_transcripts: row.get::<_, i64>(3)? as usize,
+                    untranscribed: row.get::<_, i64>(4)? as usize,
+                    hits_total: 0,
+                })
+            },
+        )
+        .unwrap_or_default();
+    library.hits_total = conn
+        .query_row("SELECT COUNT(*) FROM scan_hits", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap_or(0) as usize;
+    library
 }
 
 /// Delete audio older than `retention_days` while keeping every hit row.

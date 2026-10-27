@@ -371,6 +371,10 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/hits/{id}/recording",
             delete(handlers::recordings::delete_recording),
         )
+        .route(
+            "/api/v1/hits/{id}/waveform",
+            get(handlers::recordings::get_hit_waveform),
+        )
         .route("/api/v1/status", get(handlers::status::get_status))
         .route(
             "/api/v1/recordings/summary",

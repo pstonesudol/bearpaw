@@ -941,6 +941,8 @@ stays as the unfiltered feed the live dashboard consumes.
 | `has_recording` | `true` / `false`. |
 | `recording_status` | `none`, `recording`, `ready`, `partial`, `too_short`, `failed`, `deleted`, `missing`. |
 | `transcript_status` | `none`, `pending`, `processing`, `completed`, `failed`. |
+| `sort` | `timestamp` (default), `frequency`, `duration`, `channel`. |
+| `order` | `desc` (default) or `asc`. `id` breaks ties so paging is stable. |
 | `limit` | 1–500, default 100. |
 | `offset` | Default 0. |
 
@@ -1080,14 +1082,39 @@ so it sizes what the list can play rather than every file in the folder.
   "bytes": 9526154,
   "oldest_timestamp": 1760000000.1,
   "failed_transcripts": 41,
+  "untranscribed": 20,
+  "hits_total": 51,
   "retention_days": 30
 }
 ```
 
 `oldest_timestamp` is `null` for an empty library. `retention_days: 0` means
-"keep until the hit itself ages out of analytics retention". This is separate
-from `/audio/status` on purpose: that one is polled for the input level, and this
-runs a database aggregate.
+"keep until the hit itself ages out of analytics retention". `hits_total` counts
+every hit, recorded or not, so a recordings view can label its "all" filter;
+`untranscribed` counts playable audio whose transcript is missing or still in
+flight. This is separate from `/audio/status` on purpose: that one is polled for
+the input level, and this runs a database aggregate.
+
+#### GET /hits/{id}/waveform
+
+Peak shape of the stored WAV, for drawing a row without downloading its audio.
+
+**Query parameters:** `buckets` (8–512, default 64).
+
+```json
+{
+  "buckets": [0, 12, 48, 100, 100, 63],
+  "peak_dbfs": -0.0,
+  "clipped": true
+}
+```
+
+`buckets` is always the requested length, with each value 0–100. `clipped` is
+true when at least 0.2% of samples sit at the clip threshold — the condition that
+turns a transcription into `transcription_empty`. `404 recording_not_found` when
+the hit has no file, `404 recording_file_missing` when it is gone, and `500` with
+`waveform_unreadable` / `waveform_unsupported_format` for a file that is not
+16-bit PCM.
 
 #### POST /audio/test
 

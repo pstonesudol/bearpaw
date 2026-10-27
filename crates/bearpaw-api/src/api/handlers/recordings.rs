@@ -14,6 +14,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::super::{hit_store, ApiError, AppState};
+use crate::waveform;
 
 #[derive(Deserialize)]
 pub(crate) struct TestClipRequest {
@@ -68,8 +69,52 @@ pub(crate) async fn get_recordings_summary(State(state): State<AppState>) -> Jso
         "bytes": library.bytes,
         "oldest_timestamp": library.oldest_timestamp,
         "failed_transcripts": library.failed_transcripts,
+        "untranscribed": library.untranscribed,
+        "hits_total": library.hits_total,
         "retention_days": state.recordings.settings().retention_days,
     }))
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct WaveformQuery {
+    buckets: Option<usize>,
+}
+
+/// Peak shape of one recording, for the list's waveform.
+///
+/// Decoded from the stored WAV rather than the browser's copy so the row can
+/// draw (and flag clipping) without downloading the file.
+pub(crate) async fn get_hit_waveform(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<WaveformQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let hit = hit_store::get_hit(&state.analytics_db_path, &id)
+        .ok_or_else(|| ApiError::NotFound("hit_not_found".to_string()))?;
+    let file = hit
+        .recording_file
+        .as_deref()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| ApiError::NotFound("recording_not_found".to_string()))?;
+    let path = state
+        .recordings
+        .audio_path(file)
+        .ok_or_else(|| ApiError::NotFound("recording_not_found".to_string()))?;
+    if !path.is_file() {
+        return Err(ApiError::NotFound("recording_file_missing".to_string()));
+    }
+
+    let buckets = query.buckets.unwrap_or(64).clamp(8, 512);
+    let summary = tokio::task::spawn_blocking(move || waveform::summarize(&path, buckets))
+        .await
+        .map_err(|e| ApiError::Internal(format!("waveform_failed: {e}")))?
+        .map_err(ApiError::Internal)?;
+
+    Ok(Json(json!({
+        "buckets": summary.buckets,
+        "peak_dbfs": summary.peak_dbfs,
+        "clipped": summary.clipped,
+    })))
 }
 
 pub(crate) async fn post_audio_test(
@@ -473,7 +518,81 @@ mod api_tests {
         assert_eq!(body["bytes"], 2_056);
         assert_eq!(body["oldest_timestamp"], 1_700_000_000.0);
         assert_eq!(body["failed_transcripts"], 1);
+        // `h-api` carries audio with no transcript status at all.
+        assert_eq!(body["untranscribed"], 1);
+        assert_eq!(body["hits_total"], 2);
         assert!(body["retention_days"].as_u64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn the_waveform_route_reports_peaks_and_refuses_a_missing_file() {
+        let (state, root) = seeded();
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer =
+            hound::WavWriter::create(root.join("h-api.wav"), spec).expect("wav writer");
+        for index in 0..8_000 {
+            writer
+                .write_sample(if index % 2 == 0 { 32_767i16 } else { -32_768 })
+                .expect("sample");
+        }
+        writer.finalize().expect("finalize");
+
+        let (status, _, body) = call(
+            &state,
+            Method::GET,
+            "/api/v1/hits/h-api/waveform?buckets=16",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let body = json(&body);
+        assert_eq!(body["buckets"].as_array().expect("buckets").len(), 16);
+        assert_eq!(body["clipped"], true);
+        assert!(body["peak_dbfs"].as_f64().unwrap() > -0.1);
+
+        std::fs::remove_file(root.join("h-api.wav")).expect("remove");
+        let (status, _, body) =
+            call(&state, Method::GET, "/api/v1/hits/h-api/waveform", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(json(&body)["error"], "recording_file_missing");
+    }
+
+    #[tokio::test]
+    async fn hits_can_be_ordered_oldest_first() {
+        let (state, _root) = seeded();
+        insert_analytics_hit(
+            &state.analytics_db_path,
+            &ActivityHit {
+                id: "2".to_string(),
+                timestamp: 1_700_003_600.0,
+                frequency: 160.59,
+                channel: Some(56),
+                alpha_tag: Some("SEPTA NORTH".to_string()),
+                rssi: 30,
+                duration: 4.0,
+                modulation: "NFM".to_string(),
+                mode: ScannerMode::Scan,
+                bank: Some(2),
+                session_id: "s".to_string(),
+                ended_at: 1_700_003_604.0,
+                scanner_id: Some("BC125AT".to_string()),
+                hit_uid: Some("h-newer".to_string()),
+                recording_status: "ready".to_string(),
+                recording_file: Some("h-newer.wav".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let (_, _, body) = call(&state, Method::GET, "/api/v1/hits?limit=10", None).await;
+        assert_eq!(json(&body)["hits"][0]["hit_uid"], "h-newer");
+
+        let (_, _, body) = call(&state, Method::GET, "/api/v1/hits?order=asc&limit=10", None).await;
+        assert_eq!(json(&body)["hits"][0]["hit_uid"], "h-api");
     }
 
     #[tokio::test]
